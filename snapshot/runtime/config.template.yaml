@@ -342,7 +342,7 @@ code_execution:
 custom_providers:
 - name: Integrate.api.nvidia.com
   base_url: https://integrate.api.nvidia.com/v1
-  api_key: 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
+  api_key: YOUR_QWEN_API_KEY_HERE
   model: qwen/qwen3.5-397b-a17b
 web:
   backend: firecrawl
