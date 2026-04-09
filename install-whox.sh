@@ -549,6 +549,68 @@ verify_installation_ready() {
   return 0
 }
 
+ensure_system_gateway_running() {
+  local whox_bin="$1"
+  local setup_dir="$2"
+  local run_as_user="$3"
+  local python_exec="${setup_dir}/venv/bin/python"
+  local unit_name="whox-gateway.service"
+  local unit_file="/etc/systemd/system/${unit_name}"
+  local run_home
+  run_home="$(getent passwd "${run_as_user}" 2>/dev/null | cut -d: -f6)"
+  [[ -z "$run_home" ]] && run_home="/root"
+
+  if [[ ! -x "$python_exec" ]]; then
+    echo "System gateway repair failed: Python executable not found at ${python_exec}" >&2
+    return 1
+  fi
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "${unit_name}" >/dev/null 2>&1 || true
+  systemctl enable "${unit_name}" >/dev/null 2>&1 || true
+  systemctl restart "${unit_name}" >/dev/null 2>&1 || true
+  sleep 2
+  if systemctl is-active --quiet "${unit_name}"; then
+    return 0
+  fi
+
+  # If systemd reports 203/EXEC or stale paths, overwrite with a known-good unit.
+  cat > "${unit_file}" <<EOF
+[Unit]
+Description=WHOX Agent Gateway - Messaging Platform Integration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${run_as_user}
+WorkingDirectory=${setup_dir}
+Environment=HOME=${run_home}
+Environment=PYTHONUNBUFFERED=1
+ExecStart=${python_exec} -m whox_cli.main gateway run --replace
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl reset-failed "${unit_name}" >/dev/null 2>&1 || true
+  systemctl enable "${unit_name}" >/dev/null 2>&1 || true
+  systemctl restart "${unit_name}" >/dev/null 2>&1 || true
+  sleep 2
+  if systemctl is-active --quiet "${unit_name}"; then
+    return 0
+  fi
+
+  echo "System gateway service failed to start after auto-repair." >&2
+  systemctl status "${unit_name}" --no-pager -l >&2 || true
+  journalctl -u "${unit_name}" -n 80 --no-pager >&2 || true
+  return 1
+}
+
 apply_snapshot_templates() {
   mkdir -p "$WHOX_HOME"
   if [[ -f "${SNAPSHOT_RUNTIME_DIR}/.env.template" ]]; then
@@ -1034,6 +1096,10 @@ if [[ -n "$WHOX_BIN" ]]; then
   if [[ "$(uname -s)" == "Linux" ]] && [[ "$IS_ROOT" -eq 1 ]]; then
     if "$WHOX_BIN" gateway install --system --run-as-user "$RUN_AS_USER" --force; then
       INSTALLED_SCOPE="system"
+      if ! ensure_system_gateway_running "$WHOX_BIN" "$SETUP_DIR" "$RUN_AS_USER"; then
+        echo -e "${RED}✗${NC} system gateway auto-repair failed."
+        exit 1
+      fi
     else
       echo -e "${RED}✗${NC} system service install failed."
       exit 1
