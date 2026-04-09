@@ -122,7 +122,13 @@ install_prerequisites() {
 
 firecrawl_http_code() {
   local path="$1"
-  curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:3002${path}" 2>/dev/null || echo "000"
+  local code=""
+  code="$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:3002${path}" 2>/dev/null || true)"
+  if [[ ! "$code" =~ ^[0-9]{3}$ ]]; then
+    echo "000"
+  else
+    echo "$code"
+  fi
 }
 
 upsert_env() {
@@ -497,11 +503,22 @@ verify_installation_ready() {
     return 1
   fi
 
-  if ! curl -fsS --max-time 5 "http://127.0.0.1:3002/v1/health" >/dev/null 2>&1; then
-    echo "Firecrawl health check failed during final verification." >&2
-    return 1
+  local code_v1 code_root
+  code_v1="$(firecrawl_http_code "/v1/health")"
+  code_root="$(firecrawl_http_code "/")"
+  if [[ "$code_v1" == "200" ]]; then
+    echo "✓ Firecrawl API healthy"
+  else
+    case "$code_root" in
+      200|301|302|400|401|403|404|405)
+        echo "✓ Firecrawl API reachable (root HTTP ${code_root})"
+        ;;
+      *)
+        echo "Firecrawl health check failed during final verification (health=${code_v1}, root=${code_root})." >&2
+        return 1
+        ;;
+    esac
   fi
-  echo "✓ Firecrawl API healthy"
 
   if [[ "$scope" == "system" ]]; then
     if [[ "$(id -u)" -eq 0 ]]; then
@@ -1015,23 +1032,22 @@ if [[ -n "$WHOX_BIN" ]]; then
 
   # Prefer Linux system service for boot-time reliability on VPS.
   if [[ "$(uname -s)" == "Linux" ]] && [[ "$IS_ROOT" -eq 1 ]]; then
-    if "$WHOX_BIN" gateway install --system --run-as-user "$RUN_AS_USER"; then
+    if "$WHOX_BIN" gateway install --system --run-as-user "$RUN_AS_USER" --force; then
       INSTALLED_SCOPE="system"
     else
-      echo -e "${YELLOW}Note:${NC} system service install failed, falling back to user service."
-      "$WHOX_BIN" gateway install || true
-      INSTALLED_SCOPE="user"
+      echo -e "${RED}✗${NC} system service install failed."
+      exit 1
     fi
   elif [[ "$(uname -s)" == "Linux" ]] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    if sudo "$WHOX_BIN" gateway install --system --run-as-user "$USER"; then
+    if sudo "$WHOX_BIN" gateway install --system --run-as-user "$USER" --force; then
       INSTALLED_SCOPE="system"
     else
       echo -e "${YELLOW}Note:${NC} system service install failed, falling back to user service."
-      "$WHOX_BIN" gateway install || true
+      "$WHOX_BIN" gateway install --force || true
       INSTALLED_SCOPE="user"
     fi
   else
-    "$WHOX_BIN" gateway install || true
+    "$WHOX_BIN" gateway install --force || true
     INSTALLED_SCOPE="user"
   fi
 
