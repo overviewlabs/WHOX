@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 3 ]]; then
+  echo "Usage: whox-run-and-publish <subdomain-label> <workdir> <start-command> [port]" >&2
+  exit 1
+fi
+
+LABEL="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+WORKDIR="$2"
+START_CMD="$3"
+PORT="${4:-}"
+SERVICE_NAME="whox-app-${LABEL}"
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+UNIT_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
+
+if [[ -z "$PORT" ]]; then
+  for candidate in $(seq 4100 4999); do
+    if ! ss -ltn "( sport = :${candidate} )" | grep -q LISTEN; then
+      PORT="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$PORT" ]]; then
+  echo "No free port found in range 4100-4999" >&2
+  exit 1
+fi
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+  echo "Invalid port: $PORT" >&2
+  exit 1
+fi
+
+RESOLVED_CMD="${START_CMD//\{PORT\}/$PORT}"
+RESOLVED_CMD="${RESOLVED_CMD//\{HOST\}/127.0.0.1}"
+
+mkdir -p "$SYSTEMD_DIR"
+
+cat > "$UNIT_FILE" <<EOF
+[Unit]
+Description=WHOX app service for ${LABEL}
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${WORKDIR}
+Environment=PORT=${PORT}
+Environment=HOST=127.0.0.1
+ExecStart=/bin/bash -lc ${RESOLVED_CMD@Q}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now "${SERVICE_NAME}"
+
+/home/ubuntu/.whox/bin/whox-publish "$LABEL" "$PORT"
+
+echo "Service: ${SERVICE_NAME}"
+BASE_DOMAIN_RAW="${WHOX_BASE_DOMAIN:-}"
+BASE_DOMAIN="$(echo "$BASE_DOMAIN_RAW" | tr '[:upper:]' '[:lower:]' | sed 's#^https\?://##;s#^\.##;s#^\*\.##;s#/$##')"
+if [[ -z "$BASE_DOMAIN" ]]; then
+  echo "URL: unavailable (WHOX_BASE_DOMAIN not set)"
+else
+echo "URL: https://${LABEL}.${BASE_DOMAIN}"
+fi
+echo "Port: ${PORT}"

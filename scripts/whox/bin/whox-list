@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WHOX_HOME="${WHOX_HOME:-$HOME/.whox}"
+MAP_FILE="${WHOX_HOME}/apps/published-apps.map"
+BASE_DOMAIN_RAW="${WHOX_BASE_DOMAIN:-}"
+BASE_DOMAIN="$(echo "$BASE_DOMAIN_RAW" | tr '[:upper:]' '[:lower:]' | sed 's#^https\?://##;s#^\.##;s#^\*\.##;s#/$##')"
+
+if [[ -z "$BASE_DOMAIN" ]]; then
+  echo "WHOX_BASE_DOMAIN is not set. Published app URLs are unavailable."
+  exit 1
+fi
+
+if [[ ! -f "$MAP_FILE" ]]; then
+  echo "No published apps yet."
+  exit 0
+fi
+
+awk -v base_domain="$BASE_DOMAIN" 'NF >= 2 { printf "https://%s.%s -> 127.0.0.1:%s\n", $1, base_domain, $2 }' "$MAP_FILE"

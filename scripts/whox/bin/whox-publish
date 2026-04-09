@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "Usage: whox-publish <subdomain-label> <port>" >&2
+  exit 1
+fi
+
+LABEL="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+PORT="$2"
+BASE_DOMAIN_RAW="${WHOX_BASE_DOMAIN:-}"
+BASE_DOMAIN="$(echo "$BASE_DOMAIN_RAW" | tr '[:upper:]' '[:lower:]' | sed 's#^https\?://##;s#^\.##;s#^\*\.##;s#/$##')"
+DOMAIN="${LABEL}.${BASE_DOMAIN}"
+WHOX_HOME="${WHOX_HOME:-$HOME/.whox}"
+APPS_DIR="${WHOX_HOME}/apps"
+MAP_FILE="${APPS_DIR}/published-apps.map"
+GENERATED_FILE="${APPS_DIR}/caddy-apps.caddy"
+TARGET_INCLUDE="/etc/caddy/whox-apps.caddy"
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+SERVICE_NAME="whox-app-${LABEL}"
+UNIT_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
+
+if ! [[ "$LABEL" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  echo "Invalid subdomain label: $LABEL" >&2
+  exit 1
+fi
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+  echo "Invalid port: $PORT" >&2
+  exit 1
+fi
+
+if [[ -z "$BASE_DOMAIN" ]]; then
+  echo "WHOX_BASE_DOMAIN is not set. Refusing to publish without a base domain." >&2
+  echo "Set WHOX_BASE_DOMAIN to the suffix you want (example: test.whox.ai)." >&2
+  exit 1
+fi
+
+ensure_managed_service() {
+  if [[ -f "$UNIT_FILE" ]]; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable --now "${SERVICE_NAME}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local latest_app=""
+  latest_app="$(ls -dt "${APPS_DIR}/${LABEL}"-* 2>/dev/null | head -n1 || true)"
+  if [[ -z "$latest_app" ]]; then
+    return 1
+  fi
+
+  local workdir=""
+  local start_cmd=""
+  if [[ -f "${latest_app}/frontend/index.html" ]]; then
+    workdir="${latest_app}/frontend"
+    start_cmd="python3 -m http.server ${PORT} --bind 127.0.0.1"
+  elif [[ -d "${latest_app}/frontend" ]]; then
+    workdir="${latest_app}/frontend"
+    start_cmd="python3 -m http.server ${PORT} --bind 127.0.0.1"
+  elif [[ -f "${latest_app}/index.html" ]]; then
+    workdir="${latest_app}"
+    start_cmd="python3 -m http.server ${PORT} --bind 127.0.0.1"
+  elif [[ -d "${latest_app}" ]]; then
+    workdir="${latest_app}"
+    start_cmd="python3 -m http.server ${PORT} --bind 127.0.0.1"
+  fi
+
+  if [[ -z "$workdir" || -z "$start_cmd" ]]; then
+    return 1
+  fi
+
+  mkdir -p "$SYSTEMD_DIR"
+  cat > "$UNIT_FILE" <<EOF
+[Unit]
+Description=WHOX app service for ${LABEL}
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${workdir}
+Environment=PORT=${PORT}
+Environment=HOST=127.0.0.1
+ExecStart=/bin/bash -lc ${start_cmd@Q}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now "${SERVICE_NAME}"
+  return 0
+}
+
+if ! ensure_managed_service; then
+  echo "Refusing to publish unmanaged app '${LABEL}' on port ${PORT}." >&2
+  echo "Use whox-run-and-publish so a persistent systemd service is created." >&2
+  exit 1
+fi
+
+mkdir -p "$APPS_DIR"
+touch "$MAP_FILE"
+
+TMP_MAP="$(mktemp)"
+awk -v label="$LABEL" '$1 != label { print $0 }' "$MAP_FILE" > "$TMP_MAP"
+echo "$LABEL $PORT" >> "$TMP_MAP"
+sort -k1,1 "$TMP_MAP" > "$MAP_FILE"
+rm -f "$TMP_MAP"
+
+{
+  echo "# Managed by ~/.whox/bin/whox-publish"
+  echo "# Format source: ${MAP_FILE}"
+  while read -r app_label app_port; do
+    [[ -z "${app_label:-}" ]] && continue
+    [[ "${app_label:0:1}" == "#" ]] && continue
+    cat <<EOF
+${app_label}.${BASE_DOMAIN} {
+  encode gzip zstd
+  reverse_proxy 127.0.0.1:${app_port}
+}
+
+EOF
+  done < "$MAP_FILE"
+} > "$GENERATED_FILE"
+
+sudo install -m 0644 "$GENERATED_FILE" "$TARGET_INCLUDE"
+sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null
+sudo systemctl reload caddy
+
+echo "Published https://${DOMAIN} -> 127.0.0.1:${PORT}"

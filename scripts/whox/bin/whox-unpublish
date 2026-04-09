@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: whox-unpublish <subdomain-label>" >&2
+  exit 1
+fi
+
+LABEL="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+BASE_DOMAIN_RAW="${WHOX_BASE_DOMAIN:-}"
+BASE_DOMAIN="$(echo "$BASE_DOMAIN_RAW" | tr '[:upper:]' '[:lower:]' | sed 's#^https\?://##;s#^\.##;s#^\*\.##;s#/$##')"
+WHOX_HOME="${WHOX_HOME:-$HOME/.whox}"
+APPS_DIR="${WHOX_HOME}/apps"
+MAP_FILE="${APPS_DIR}/published-apps.map"
+GENERATED_FILE="${APPS_DIR}/caddy-apps.caddy"
+TARGET_INCLUDE="/etc/caddy/whox-apps.caddy"
+
+if [[ -z "$BASE_DOMAIN" ]]; then
+  echo "WHOX_BASE_DOMAIN is not set. Nothing to unpublish from a domain." >&2
+  exit 1
+fi
+
+if ! [[ -f "$MAP_FILE" ]]; then
+  echo "No published apps map found at $MAP_FILE"
+  exit 0
+fi
+
+TMP_MAP="$(mktemp)"
+awk -v label="$LABEL" '$1 != label { print $0 }' "$MAP_FILE" > "$TMP_MAP"
+mv "$TMP_MAP" "$MAP_FILE"
+
+{
+  echo "# Managed by ~/.whox/bin/whox-publish"
+  echo "# Format source: ${MAP_FILE}"
+  while read -r app_label app_port; do
+    [[ -z "${app_label:-}" ]] && continue
+    [[ "${app_label:0:1}" == "#" ]] && continue
+    cat <<EOF
+${app_label}.${BASE_DOMAIN} {
+  encode gzip zstd
+  reverse_proxy 127.0.0.1:${app_port}
+}
+
+EOF
+  done < "$MAP_FILE"
+} > "$GENERATED_FILE"
+
+sudo install -m 0644 "$GENERATED_FILE" "$TARGET_INCLUDE"
+sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null
+sudo systemctl reload caddy
+
+echo "Unpublished https://${LABEL}.${BASE_DOMAIN}"
