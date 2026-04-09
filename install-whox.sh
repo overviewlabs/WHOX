@@ -91,7 +91,9 @@ install_prerequisites() {
 
   if [[ "$(id -u)" -eq 0 ]]; then
     apt-get update -y >/dev/null
-    apt-get install -y ca-certificates curl git jq ripgrep python3.11 python3.11-venv >/dev/null || true
+    if ! apt-get install -y ca-certificates curl git jq ripgrep python3.11 python3.11-venv >/dev/null 2>&1; then
+      apt-get install -y ca-certificates curl git jq ripgrep python3 python3-venv >/dev/null 2>&1 || true
+    fi
     # Docker stack is required by Firecrawl
     if ! command -v docker >/dev/null 2>&1; then
       if ! apt-get install -y docker.io docker-compose-plugin >/dev/null; then
@@ -102,7 +104,9 @@ install_prerequisites() {
   else
     if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
       sudo apt-get update -y >/dev/null
-      sudo apt-get install -y ca-certificates curl git jq ripgrep python3.11 python3.11-venv >/dev/null || true
+      if ! sudo apt-get install -y ca-certificates curl git jq ripgrep python3.11 python3.11-venv >/dev/null 2>&1; then
+        sudo apt-get install -y ca-certificates curl git jq ripgrep python3 python3-venv >/dev/null 2>&1 || true
+      fi
       if ! command -v docker >/dev/null 2>&1; then
         if ! sudo apt-get install -y docker.io docker-compose-plugin >/dev/null; then
           sudo apt-get install -y docker.io docker-compose >/dev/null || true
@@ -114,6 +118,11 @@ install_prerequisites() {
     fi
   fi
   echo "✓ Prerequisites checked"
+}
+
+firecrawl_http_code() {
+  local path="$1"
+  curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:3002${path}" 2>/dev/null || echo "000"
 }
 
 upsert_env() {
@@ -316,7 +325,6 @@ EOF
 
   echo "Starting Firecrawl stack..."
   cat > "${FIRECRAWL_DIR}/docker-compose.runtime.yaml" <<'EOF'
-version: "3.9"
 services:
   playwright-service:
     image: ghcr.io/firecrawl/playwright-service:latest
@@ -441,13 +449,24 @@ EOF
   echo "Waiting for Firecrawl health (timeout: ${health_timeout}s)..."
   local elapsed=0
   local tick=2
+  local code_v1 code_root
   while [[ "$elapsed" -lt "$health_timeout" ]]; do
-    if curl -fsS --max-time 3 "http://127.0.0.1:3002/v1/health" >/dev/null 2>&1; then
+    code_v1="$(firecrawl_http_code "/v1/health")"
+    code_root="$(firecrawl_http_code "/")"
+    if [[ "$code_v1" == "200" ]]; then
       echo "✓ Firecrawl healthy at http://127.0.0.1:3002"
       return 0
     fi
+    # Some Firecrawl builds don't expose /v1/health consistently; if root responds
+    # with any normal HTTP status, the API is reachable and ready for WHOX.
+    case "$code_root" in
+      200|301|302|400|401|403|404|405)
+        echo "✓ Firecrawl reachable at http://127.0.0.1:3002 (root HTTP ${code_root})"
+        return 0
+        ;;
+    esac
     if (( elapsed % 10 == 0 )); then
-      echo "  still waiting... ${elapsed}s elapsed"
+      echo "  still waiting... ${elapsed}s elapsed (health=${code_v1}, root=${code_root})"
     fi
     sleep "$tick"
     elapsed=$((elapsed + tick))
