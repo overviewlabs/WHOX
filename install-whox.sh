@@ -142,6 +142,7 @@ ensure_firecrawl_stack() {
   local qwen_key="$1"
   local base_url="$2"
   local model_name="$3"
+  local health_timeout="${WHOX_FIRECRAWL_HEALTH_TIMEOUT:-600}"
 
   echo -e "${CYAN}Provisioning Firecrawl (self-hosted web backend)...${NC}"
 
@@ -351,6 +352,7 @@ networks:
     driver: bridge
 EOF
 
+  local compose_file="docker-compose.runtime.yaml"
   (
     cd "$FIRECRAWL_DIR"
     local -a compose_run
@@ -358,9 +360,9 @@ EOF
     local -a run_up_cmd
     if [[ "$use_legacy_compose" -eq 1 ]]; then
       echo "Using legacy docker-compose compatibility mode"
-      run_up_cmd=("${compose_run[@]}" -f docker-compose.runtime.yaml up -d --no-build)
+      run_up_cmd=("${compose_run[@]}" -f "$compose_file" up -d --no-build)
     else
-      run_up_cmd=("${compose_run[@]}" -f docker-compose.runtime.yaml up -d --no-build)
+      run_up_cmd=("${compose_run[@]}" -f "$compose_file" up -d --no-build)
     fi
 
     echo "Pulling Firecrawl images (this can take a few minutes on first install)..."
@@ -390,17 +392,33 @@ EOF
     fi
   )
 
-  echo "Waiting for Firecrawl health..."
-  local i
-  for i in $(seq 1 60); do
+  echo "Waiting for Firecrawl health (timeout: ${health_timeout}s)..."
+  local elapsed=0
+  local tick=2
+  while [[ "$elapsed" -lt "$health_timeout" ]]; do
     if curl -fsS --max-time 3 "http://127.0.0.1:3002/v1/health" >/dev/null 2>&1; then
       echo "✓ Firecrawl healthy at http://127.0.0.1:3002"
       return 0
     fi
-    sleep 2
+    if (( elapsed % 10 == 0 )); then
+      echo "  still waiting... ${elapsed}s elapsed"
+    fi
+    sleep "$tick"
+    elapsed=$((elapsed + tick))
   done
 
   echo "Firecrawl did not become healthy in time." >&2
+  echo "Container status:" >&2
+  (
+    cd "$FIRECRAWL_DIR"
+    "${compose_cmd[@]}" -f "$compose_file" ps >&2 || true
+    echo "" >&2
+    echo "Last logs (api):" >&2
+    "${compose_cmd[@]}" -f "$compose_file" logs --tail=80 api >&2 || true
+    echo "" >&2
+    echo "Last logs (searxng):" >&2
+    "${compose_cmd[@]}" -f "$compose_file" logs --tail=80 searxng >&2 || true
+  )
   return 1
 }
 
