@@ -15,6 +15,9 @@ DEFAULT_TZ="America/New_York"
 DEFAULT_DOMAIN=""
 FIRECRAWL_REPO_URL="${WHOX_FIRECRAWL_REPO_URL:-https://github.com/mendableai/firecrawl.git}"
 FIRECRAWL_DIR="${WHOX_FIRECRAWL_DIR:-$HOME/firecrawl}"
+SNAPSHOT_DIR="${WHOX_SNAPSHOT_DIR:-$SCRIPT_DIR/snapshot}"
+SNAPSHOT_RUNTIME_DIR="${SNAPSHOT_DIR}/runtime"
+SNAPSHOT_FIRECRAWL_DIR="${SNAPSHOT_DIR}/firecrawl"
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -73,6 +76,44 @@ prompt_yes_no() {
       n|no) return 1 ;;
     esac
   done
+}
+
+install_prerequisites() {
+  echo -e "${CYAN}Installing prerequisites...${NC}"
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "Non-Linux host detected; skipping apt prerequisite bootstrap."
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "apt-get not available; skipping system prerequisite bootstrap."
+    return 0
+  fi
+
+  if [[ "$(id -u)" -eq 0 ]]; then
+    apt-get update -y >/dev/null
+    apt-get install -y ca-certificates curl git jq ripgrep python3.11 python3.11-venv >/dev/null || true
+    # Docker stack is required by Firecrawl
+    if ! command -v docker >/dev/null 2>&1; then
+      if ! apt-get install -y docker.io docker-compose-plugin >/dev/null; then
+        apt-get install -y docker.io docker-compose >/dev/null || true
+      fi
+      systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+  else
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo apt-get update -y >/dev/null
+      sudo apt-get install -y ca-certificates curl git jq ripgrep python3.11 python3.11-venv >/dev/null || true
+      if ! command -v docker >/dev/null 2>&1; then
+        if ! sudo apt-get install -y docker.io docker-compose-plugin >/dev/null; then
+          sudo apt-get install -y docker.io docker-compose >/dev/null || true
+        fi
+        sudo systemctl enable --now docker >/dev/null 2>&1 || true
+      fi
+    else
+      echo "No root privileges; prerequisite install skipped (continuing with existing system packages)."
+    fi
+  fi
+  echo "✓ Prerequisites checked"
 }
 
 upsert_env() {
@@ -228,6 +269,11 @@ ensure_firecrawl_stack() {
     echo "Updating Firecrawl repo..."
     git -C "$FIRECRAWL_DIR" fetch --depth=1 origin main >/dev/null 2>&1 || true
     git -C "$FIRECRAWL_DIR" reset --hard origin/main >/dev/null 2>&1 || true
+  fi
+
+  if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
+    mkdir -p "${FIRECRAWL_DIR}/searxng"
+    cp "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" "${FIRECRAWL_DIR}/searxng/settings.yml"
   fi
 
   local searx_secret
@@ -467,6 +513,20 @@ verify_installation_ready() {
   return 0
 }
 
+apply_snapshot_templates() {
+  mkdir -p "$WHOX_HOME"
+  if [[ -f "${SNAPSHOT_RUNTIME_DIR}/.env.template" ]]; then
+    cp "${SNAPSHOT_RUNTIME_DIR}/.env.template" "${WHOX_HOME}/.env.snapshot.template"
+  fi
+  if [[ -f "${SNAPSHOT_RUNTIME_DIR}/config.template.yaml" ]]; then
+    cp "${SNAPSHOT_RUNTIME_DIR}/config.template.yaml" "${WHOX_HOME}/config.snapshot.template.yaml"
+  fi
+  if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
+    mkdir -p "${FIRECRAWL_DIR}/searxng"
+    cp "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" "${FIRECRAWL_DIR}/searxng/settings.yml"
+  fi
+}
+
 send_telegram_boot_ping() {
   local token="$1"
   local allowed_csv="$2"
@@ -484,6 +544,11 @@ send_telegram_boot_ping() {
 resolve_setup_dir() {
   # Normal path: running from a cloned repo.
   if [[ -f "${SCRIPT_DIR}/setup-whox.sh" ]]; then
+    if [[ -d "${SCRIPT_DIR}/.git" ]]; then
+      echo "Updating WHOX repo to latest snapshot..."
+      git -C "$SCRIPT_DIR" fetch --depth=1 origin main >/dev/null 2>&1 || true
+      git -C "$SCRIPT_DIR" reset --hard origin/main >/dev/null 2>&1 || true
+    fi
     SETUP_DIR="$SCRIPT_DIR"
     REPO_ENV_FILE="${SETUP_DIR}/.env"
     return 0
@@ -517,6 +582,12 @@ echo ""
 echo "Get your Qwen API key from:"
 echo "https://build.nvidia.com/qwen/qwen3.5-397b-a17b"
 echo ""
+
+if [[ -d "$WHOX_HOME" ]]; then
+  echo -e "${CYAN}Detected existing WHOX install at ${WHOX_HOME}${NC}"
+  echo "Installer will update it in-place to match the current snapshot."
+  echo ""
+fi
 
 QWEN_KEY="$(prompt_required "1/5 Qwen-3.5-397b-a17b API Key" 0)"
 echo "✓ Step 1 complete"
@@ -597,9 +668,13 @@ else
 fi
 
 echo ""
+install_prerequisites
+
+echo ""
 echo -e "${CYAN}Installing WHOX runtime...${NC}"
 resolve_setup_dir
 WHOX_NONINTERACTIVE=1 "$SETUP_DIR/setup-whox.sh"
+apply_snapshot_templates
 
 echo ""
 if ! ensure_firecrawl_stack "$QWEN_KEY" "$DEFAULT_BASE_URL" "$DEFAULT_MODEL"; then
@@ -610,6 +685,13 @@ fi
 echo ""
 echo -e "${CYAN}Applying WHOX configuration...${NC}"
 mkdir -p "$WHOX_HOME"
+
+if [[ -f "${SNAPSHOT_RUNTIME_DIR}/.env.template" ]]; then
+  cp "${SNAPSHOT_RUNTIME_DIR}/.env.template" "$ENV_FILE"
+fi
+if [[ -f "${SNAPSHOT_RUNTIME_DIR}/.env.template" ]]; then
+  cp "${SNAPSHOT_RUNTIME_DIR}/.env.template" "$REPO_ENV_FILE"
+fi
 
 upsert_env "$ENV_FILE" "TELEGRAM_BOT_TOKEN" "$TG_BOT_TOKEN"
 upsert_env "$ENV_FILE" "WHOX_BASE_DOMAIN" "$VPS_DOMAIN_INPUT"
@@ -707,6 +789,8 @@ WHOX_INSTALL_MODEL="$DEFAULT_MODEL" \
 WHOX_INSTALL_BASE_URL="$DEFAULT_BASE_URL" \
 WHOX_INSTALL_QWEN_KEY="$QWEN_KEY" \
 WHOX_INSTALL_TZ="$TZ_INPUT" \
+WHOX_INSTALL_BASE_DOMAIN="$VPS_DOMAIN_INPUT" \
+WHOX_INSTALL_SNAPSHOT_CONFIG_PATH="${SNAPSHOT_RUNTIME_DIR}/config.template.yaml" \
 WHOX_ENABLE_WEB="$ENABLE_WEB" \
 WHOX_ENABLE_BROWSER="$ENABLE_BROWSER" \
 WHOX_ENABLE_TERMINAL="$ENABLE_TERMINAL" \
@@ -730,7 +814,10 @@ import yaml
 
 cfg_path = Path(os.environ["WHOX_INSTALL_CONFIG_FILE"])
 cfg_path.parent.mkdir(parents=True, exist_ok=True)
-if cfg_path.exists():
+snapshot_cfg_path = Path(os.environ.get("WHOX_INSTALL_SNAPSHOT_CONFIG_PATH", ""))
+if snapshot_cfg_path.exists():
+    cfg = yaml.safe_load(snapshot_cfg_path.read_text()) or {}
+elif cfg_path.exists():
     cfg = yaml.safe_load(cfg_path.read_text()) or {}
 else:
     cfg = {}
@@ -851,6 +938,28 @@ enabled = sorted(set(enabled))
 cfg.setdefault("platform_toolsets", {})
 cfg["platform_toolsets"]["cli"] = list(enabled)
 cfg["platform_toolsets"]["telegram"] = list(enabled)
+
+base_domain = (os.environ.get("WHOX_INSTALL_BASE_DOMAIN") or "").strip().lower()
+capabilities = ", ".join(enabled) if enabled else "none"
+capability_prompt = (
+    "\n\nWHOX capability profile for this install:\n"
+    f"- Enabled toolsets: {capabilities}\n"
+    "- Use enabled tools proactively instead of claiming missing capability\n"
+    "- For unknown/current topics, use web tools before responding\n"
+    "- When domain is configured, build and publish apps/sites to isolated subdomains under the configured base domain\n"
+)
+if base_domain:
+    capability_prompt += (
+        f"- Base publishing domain: {base_domain}\n"
+        "- For build/publish requests, choose a clear app slug and publish to <slug>." + base_domain + "\n"
+    )
+else:
+    capability_prompt += (
+        "- Base publishing domain: not configured\n"
+        "- Build in isolated workspaces locally; do not claim public domain publishing is active until domain is configured\n"
+    )
+
+agent["system_prompt"] = (agent.get("system_prompt") or "").rstrip() + capability_prompt
 
 cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 PY
