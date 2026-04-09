@@ -103,7 +103,40 @@ echo -e "${CYAN}→${NC} Setting up virtual environment..."
 
 if [ -d "venv" ]; then
     echo -e "${CYAN}→${NC} Removing old venv..."
-    rm -rf venv
+    if ! rm -rf venv 2>/dev/null; then
+        # Sometimes stale perms/readonly bits inside site-packages can make
+        # recursive removal flaky on VPS images. Normalize permissions and retry.
+        chmod -R u+rwX venv 2>/dev/null || true
+        find venv -type d -exec chmod u+rwx {} \; 2>/dev/null || true
+        find venv -type f -exec chmod u+rw {} \; 2>/dev/null || true
+        rm -rf venv 2>/dev/null || true
+    fi
+    if [ -d "venv" ]; then
+        echo -e "${YELLOW}⚠${NC} rm could not fully remove venv, using Python cleanup fallback..."
+        python3 - <<'PY'
+import shutil
+import os
+import stat
+from pathlib import Path
+
+root = Path("venv")
+if root.exists():
+    def _onerror(func, path, exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        except Exception:
+            pass
+        try:
+            func(path)
+        except Exception:
+            pass
+    shutil.rmtree(root, onerror=_onerror)
+PY
+    fi
+    if [ -d "venv" ]; then
+        echo -e "${RED}✗${NC} Failed to remove existing venv. Please run: rm -rf venv and retry."
+        exit 1
+    fi
 fi
 
 $UV_CMD venv venv --python "$PYTHON_VERSION"
