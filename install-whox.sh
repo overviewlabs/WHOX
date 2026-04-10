@@ -287,50 +287,15 @@ ensure_firecrawl_stack() {
     mv "${settings_file}.tmp" "$settings_file"
   }
 
-  write_safe_searxng_settings() {
+  restore_bundled_searxng_settings() {
     mkdir -p "${FIRECRAWL_DIR}/searxng"
-    cat > "${FIRECRAWL_DIR}/searxng/settings.yml" <<'EOF'
-general:
-  debug: false
-  instance_name: "firecrawl-searxng"
-
-search:
-  safe_search: 0
-  formats:
-    - html
-    - json
-
-server:
-  bind_address: "0.0.0.0"
-  port: 8080
-  secret_key: "changeme"
-  limiter: false
-  image_proxy: false
-
-ui:
-  default_theme: simple
-
-outgoing:
-  request_timeout: 6.0
-  enable_http2: true
-
-engines:
-  - name: duckduckgo
-    engine: duckduckgo
-    shortcut: ddg
-  - name: brave
-    engine: brave
-    shortcut: br
-  - name: qwant
-    engine: qwant
-    shortcut: qw
-  - name: wikipedia
-    engine: wikipedia
-    shortcut: wp
-  - name: wikidata
-    engine: wikidata
-    shortcut: wd
-EOF
+    if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
+      cp "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" "${FIRECRAWL_DIR}/searxng/settings.yml"
+      sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
+      return 0
+    fi
+    echo "Bundled SearXNG settings snapshot is missing." >&2
+    return 1
   }
 
   echo -e "${CYAN}Provisioning Firecrawl (self-hosted web backend)...${NC}"
@@ -420,12 +385,13 @@ EOF
   fi
 
   if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-    mkdir -p "${FIRECRAWL_DIR}/searxng"
-    cp "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" "${FIRECRAWL_DIR}/searxng/settings.yml"
+    restore_bundled_searxng_settings
   elif [[ ! -f "${FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-    write_safe_searxng_settings
+    echo "Bundled SearXNG settings snapshot is missing." >&2
+    return 1
+  else
+    sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
   fi
-  sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
 
   local searx_secret
   searx_secret="$(random_hex_64)"
@@ -612,8 +578,8 @@ EOF
       searx_restart_attempts=$((searx_restart_attempts + 1))
       echo "  searxng container exited; attempting recovery (${searx_restart_attempts}/3)..."
       if [[ "$searx_restart_attempts" -eq 2 ]]; then
-        echo "  applying safe SearXNG config fallback and recreating containers..."
-        write_safe_searxng_settings
+        echo "  restoring bundled SearXNG snapshot and recreating containers..."
+        restore_bundled_searxng_settings
       fi
       (
         cd "$FIRECRAWL_DIR"
