@@ -8711,6 +8711,28 @@ class AIAgent:
                                 messages.append(empty_msg)
                                 break
 
+                            # Last-chance recovery: force one plain-text continuation
+                            # before giving up, to avoid user-facing "think-only" errors.
+                            if not hasattr(self, "_empty_plaintext_recoveries"):
+                                self._empty_plaintext_recoveries = 0
+                            if self._empty_plaintext_recoveries < 1:
+                                self._empty_plaintext_recoveries += 1
+                                self._vprint(
+                                    f"{self.log_prefix}🔁 Forcing plain-text recovery retry ({self._empty_plaintext_recoveries}/1)...",
+                                    force=True,
+                                )
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "[System: Your previous reply had no visible user-facing content. "
+                                            "Reply now in plain text only, with no <think>/<thinking>/<reasoning> tags. "
+                                            "If task work is incomplete, continue and provide the visible progress/result.]"
+                                        ),
+                                    }
+                                )
+                                continue
+
                             # Truly empty -- no reasoning and no content
                             empty_msg = {
                                 "role": "assistant",
@@ -8719,30 +8741,23 @@ class AIAgent:
                                 "finish_reason": finish_reason,
                             }
                             messages.append(empty_msg)
-
-                            self._cleanup_task_resources(effective_task_id)
-                            self._persist_session(messages, conversation_history)
-
-                            error_message = "Model generated only think blocks with no actual response after 3 retries"
-                            if empty_response_info["is_local_custom"]:
-                                error_message = (
-                                    "Local/custom backend returned reasoning-only output with no visible response after 3 retries. "
-                                    "Likely causes: wrong /v1 endpoint, runtime context window smaller than WHOX expects, "
-                                    "or a resumed/large session exceeding the backend's actual context limit."
-                                )
-
-                            return {
-                                "final_response": final_response or None,
-                                "messages": messages,
-                                "api_calls": api_call_count,
-                                "completed": False,
-                                "partial": True,
-                                "error": error_message
-                            }
+                            # Final graceful fallback: avoid surfacing raw provider
+                            # formatting errors to the user.
+                            final_response = (
+                                "I hit a temporary provider formatting issue and couldn't produce visible output in that attempt "
+                                "I'll continue from where we left off if you send your request again"
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}⚠️  Empty-response recovery exhausted; using graceful fallback response.",
+                                force=True,
+                            )
+                            break
                     
                     # Reset retry counter/signature on successful content
                     if hasattr(self, '_empty_content_retries'):
                         self._empty_content_retries = 0
+                    if hasattr(self, "_empty_plaintext_recoveries"):
+                        self._empty_plaintext_recoveries = 0
                     self._last_empty_content_signature = None
 
                     if (
