@@ -172,6 +172,28 @@ firecrawl_http_code() {
   fi
 }
 
+firecrawl_service_state() {
+  local compose_file="$1"
+  local service="$2"
+  local state="unknown"
+  (
+    cd "$FIRECRAWL_DIR"
+    # Works on both docker compose v2 and docker-compose v1 by using plain docker inspect.
+    local cid
+    cid="$(docker ps -aq --filter "label=com.docker.compose.project=firecrawl" --filter "label=com.docker.compose.service=${service}" | head -n1)"
+    if [[ -z "$cid" ]]; then
+      # Fallback: parse compose ps output if labels are absent.
+      cid="$("${compose_cmd[@]}" -f "$compose_file" ps -q "$service" 2>/dev/null | head -n1)"
+    fi
+    if [[ -n "$cid" ]]; then
+      state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo unknown)"
+      echo "$state"
+      exit 0
+    fi
+    echo "missing"
+  )
+}
+
 upsert_env() {
   local file="$1"
   local key="$2"
@@ -496,11 +518,13 @@ EOF
   echo "Waiting for Firecrawl health (timeout: ${health_timeout}s)..."
   local elapsed=0
   local tick=2
-  local code_v1 code_root
+  local code_v1 code_health code_root
+  local restart_attempted=0
   while [[ "$elapsed" -lt "$health_timeout" ]]; do
     code_v1="$(firecrawl_http_code "/v1/health")"
+    code_health="$(firecrawl_http_code "/health")"
     code_root="$(firecrawl_http_code "/")"
-    if [[ "$code_v1" == "200" ]]; then
+    if [[ "$code_v1" == "200" || "$code_health" == "200" ]]; then
       echo "✓ Firecrawl healthy at http://127.0.0.1:3002"
       return 0
     fi
@@ -512,8 +536,22 @@ EOF
         return 0
         ;;
     esac
+
+    # Self-heal once if API looks wedged (all localhost probes still 000 after 2 minutes).
+    if [[ "$restart_attempted" -eq 0 && "$elapsed" -ge 120 && "$code_v1" == "000" && "$code_health" == "000" && "$code_root" == "000" ]]; then
+      echo "  Firecrawl API still unreachable after ${elapsed}s; attempting one API container restart..."
+      (
+        cd "$FIRECRAWL_DIR"
+        "${compose_cmd[@]}" -f "$compose_file" restart api >/dev/null 2>&1 || true
+      )
+      restart_attempted=1
+    fi
+
     if (( elapsed % 10 == 0 )); then
-      echo "  still waiting... ${elapsed}s elapsed (health=${code_v1}, root=${code_root})"
+      local api_state searx_state
+      api_state="$(firecrawl_service_state "$compose_file" "api" || echo unknown)"
+      searx_state="$(firecrawl_service_state "$compose_file" "searxng" || echo unknown)"
+      echo "  still waiting... ${elapsed}s elapsed (v1=${code_v1}, health=${code_health}, root=${code_root}, api=${api_state}, searxng=${searx_state})"
     fi
     sleep "$tick"
     elapsed=$((elapsed + tick))
