@@ -78,6 +78,47 @@ prompt_yes_no() {
   done
 }
 
+full_wipe_existing_install() {
+  echo -e "${YELLOW}Existing WHOX install detected. Performing full wipe before reinstall...${NC}"
+
+  # Stop and remove system gateway unit if present.
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      systemctl stop whox-gateway.service >/dev/null 2>&1 || true
+      systemctl disable whox-gateway.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/whox-gateway.service
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo systemctl stop whox-gateway.service >/dev/null 2>&1 || true
+      sudo systemctl disable whox-gateway.service >/dev/null 2>&1 || true
+      sudo rm -f /etc/systemd/system/whox-gateway.service || true
+      sudo systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Best-effort shutdown of existing Firecrawl stack.
+  if [[ -d "$FIRECRAWL_DIR" ]]; then
+    (
+      cd "$FIRECRAWL_DIR" 2>/dev/null || exit 0
+      if command -v docker >/dev/null 2>&1; then
+        if docker compose version >/dev/null 2>&1; then
+          docker compose -f docker-compose.runtime.yaml down -v --remove-orphans >/dev/null 2>&1 || true
+        elif command -v docker-compose >/dev/null 2>&1; then
+          docker-compose -f docker-compose.runtime.yaml down -v --remove-orphans >/dev/null 2>&1 || true
+        fi
+      fi
+    ) || true
+  fi
+
+  # Remove runtime/data directories for a true fresh install.
+  rm -rf "$WHOX_HOME"
+  rm -rf "$FIRECRAWL_DIR"
+  rm -f "$HOME/.local/bin/whox"
+
+  echo "✓ Previous WHOX install removed"
+  echo ""
+}
+
 install_prerequisites() {
   echo -e "${CYAN}Installing prerequisites...${NC}"
   if [[ "$(uname -s)" != "Linux" ]]; then
@@ -683,7 +724,8 @@ echo ""
 
 if [[ -d "$WHOX_HOME" ]]; then
   echo -e "${CYAN}Detected existing WHOX install at ${WHOX_HOME}${NC}"
-  echo "Installer will update it in-place to match the current snapshot."
+  echo "Installer will wipe it fully and reinstall from scratch."
+  full_wipe_existing_install
   echo ""
 fi
 
