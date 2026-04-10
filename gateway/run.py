@@ -1998,6 +1998,71 @@ class GatewayRunner:
         except Exception:
             mode = "interrupt"
         return mode if mode in {"interrupt", "queue", "interrupt_resume"} else "interrupt"
+
+    def _get_auto_continue_limit(self) -> int:
+        """Return max automatic continuation attempts for recoverable early stops."""
+        try:
+            raw = int(str(os.getenv("WHOX_AUTO_CONTINUE_MAX", "50")).strip())
+        except Exception:
+            raw = 50
+        if raw <= 0:
+            # Keep a high cap, but avoid unbounded recursion.
+            return 200
+        return min(raw, 200)
+
+    def _should_auto_continue_after_run(self, result: Dict[str, Any]) -> bool:
+        """Decide whether a run should be auto-continued instead of stopping."""
+        if not isinstance(result, dict):
+            return False
+        if result.get("interrupted"):
+            return False
+
+        error_text = str(result.get("error") or "").lower()
+        final_text = str(result.get("final_response") or "").lower()
+        combined = f"{error_text}\n{final_text}"
+
+        # Hard-stop cases that need a user/config change, not blind retries.
+        hard_stop_markers = (
+            "thinking budget exhausted",
+            "used all output tokens on reasoning",
+            "non-retryable client error",
+            "invalid api key",
+            "unauthorized",
+            "forbidden",
+            "model not found",
+            "provider authentication failed",
+        )
+        if any(marker in combined for marker in hard_stop_markers):
+            return False
+
+        # Partial runs generally indicate a recoverable early stop.
+        if result.get("partial"):
+            return True
+
+        # Failed runs: only auto-continue for transient/network-style failures.
+        if result.get("failed"):
+            transient_markers = (
+                "timed out",
+                "timeout",
+                "remoteprotocolerror",
+                "readtimeout",
+                "connection dropped",
+                "connection reset",
+                "connection closed",
+                "server disconnected",
+                "network",
+                "temporarily unavailable",
+                "overloaded",
+                "too many requests",
+                "error code: 429",
+                "429",
+                "502",
+                "503",
+                "504",
+            )
+            return any(marker in combined for marker in transient_markers)
+
+        return False
     
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
@@ -5930,6 +5995,7 @@ class GatewayRunner:
         session_id: str,
         session_key: str = None,
         _interrupt_depth: int = 0,
+        _auto_continue_depth: int = 0,
         event_message_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -6914,7 +6980,75 @@ class GatewayRunner:
                     session_id=session_id,
                     session_key=session_key,
                     _interrupt_depth=_interrupt_depth + 1,
+                    _auto_continue_depth=_auto_continue_depth,
+                    event_message_id=event_message_id,
                 )
+
+            _auto_continue_enabled = str(
+                os.getenv("WHOX_AUTO_CONTINUE_ON_EARLY_STOP", "1")
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            _auto_continue_limit = self._get_auto_continue_limit()
+            if (
+                not pending
+                and _auto_continue_enabled
+                and self._should_auto_continue_after_run(result or {})
+            ):
+                if _auto_continue_depth < _auto_continue_limit:
+                    _next_depth = _auto_continue_depth + 1
+                    _base_prompt = (
+                        (self._active_task_prompt.get(session_key) if session_key else None)
+                        or message
+                        or ""
+                    ).strip()
+                    _continue_instruction = (
+                        "[System instruction: The previous attempt ended before the task was complete. "
+                        "Continue from the exact last successful checkpoint and finish fully. "
+                        "Do not ask for confirmation. Keep working until complete.]"
+                    )
+                    _resume_prompt = (
+                        f"{_base_prompt}\n\n{_continue_instruction}"
+                        if _base_prompt
+                        else _continue_instruction
+                    )
+                    _updated_history = (result or {}).get("messages", history)
+                    _backoff = max(
+                        0.0,
+                        float(os.getenv("WHOX_AUTO_CONTINUE_BACKOFF_SECONDS", "1.5")),
+                    )
+                    if _backoff > 0:
+                        await asyncio.sleep(_backoff)
+                    await _set_ephemeral_progress(
+                        f"⏳ continuing automatically attempt {_next_depth}"
+                    )
+                    logger.info(
+                        "Auto-continuing recoverable early stop for session %s (%s/%s)",
+                        session_key,
+                        _next_depth,
+                        _auto_continue_limit,
+                    )
+                    return await self._run_agent(
+                        message=_resume_prompt,
+                        context_prompt=context_prompt,
+                        history=_updated_history,
+                        source=source,
+                        session_id=session_id,
+                        session_key=session_key,
+                        _interrupt_depth=0,
+                        _auto_continue_depth=_next_depth,
+                        event_message_id=event_message_id,
+                    )
+                else:
+                    logger.warning(
+                        "Auto-continue limit reached for session %s (%s attempts)",
+                        session_key,
+                        _auto_continue_limit,
+                    )
+                    if isinstance(response, dict):
+                        _fr = str(response.get("final_response") or "").strip()
+                        _tail = (
+                            "⚠️ task paused after repeated recovery attempts; send any message to continue from the latest checkpoint"
+                        )
+                        response["final_response"] = f"{_fr}\n\n{_tail}" if _fr else _tail
         finally:
             # Stop progress sender, interrupt monitor, and notification task
             if progress_task:
