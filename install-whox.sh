@@ -267,6 +267,26 @@ ensure_firecrawl_stack() {
   local model_name="$3"
   local health_timeout="${WHOX_FIRECRAWL_HEALTH_TIMEOUT:-600}"
 
+  sanitize_searxng_settings() {
+    local settings_file="$1"
+    [[ -f "$settings_file" ]] || return 0
+
+    # SearXNG 2026.x rejects the legacy categories_as_tabs mapping that uses
+    # null values for each category. Drop that block and normalize one known
+    # null scalar from the bundled snapshot.
+    awk '
+      BEGIN {skip=0}
+      /^categories_as_tabs:[[:space:]]*$/ {skip=1; next}
+      skip && /^engines:[[:space:]]*$/ {skip=0}
+      !skip {
+        gsub(/official_api_documentation: null/, "official_api_documentation: false")
+        print
+      }
+      !skip && /^engines:[[:space:]]*$/ {next}
+    ' "$settings_file" > "${settings_file}.tmp"
+    mv "${settings_file}.tmp" "$settings_file"
+  }
+
   write_safe_searxng_settings() {
     mkdir -p "${FIRECRAWL_DIR}/searxng"
     cat > "${FIRECRAWL_DIR}/searxng/settings.yml" <<'EOF'
@@ -405,6 +425,7 @@ EOF
   elif [[ ! -f "${FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
     write_safe_searxng_settings
   fi
+  sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
 
   local searx_secret
   searx_secret="$(random_hex_64)"
@@ -498,7 +519,9 @@ services:
       INSTANCE_NAME: ${SEARXNG_INSTANCE_NAME:-firecrawl-searxng}
       SEARXNG_SECRET: ${SEARXNG_SECRET}
     volumes:
+      - searxng-config:/etc/searxng
       - ./searxng/settings.yml:/etc/searxng/settings.yml
+      - searxng-cache:/var/cache/searxng
     networks:
       - backend
 
@@ -525,6 +548,10 @@ services:
 networks:
   backend:
     driver: bridge
+
+volumes:
+  searxng-config:
+  searxng-cache:
 EOF
 
   local compose_file="docker-compose.runtime.yaml"
