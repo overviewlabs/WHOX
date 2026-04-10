@@ -518,13 +518,29 @@ EOF
   echo "Waiting for Firecrawl health (timeout: ${health_timeout}s)..."
   local elapsed=0
   local tick=2
-  local code_v1 code_health code_root
+  local code_v1 code_health code_root api_state searx_state
   local restart_attempted=0
+  local searx_restart_attempts=0
   while [[ "$elapsed" -lt "$health_timeout" ]]; do
     code_v1="$(firecrawl_http_code "/v1/health")"
     code_health="$(firecrawl_http_code "/health")"
     code_root="$(firecrawl_http_code "/")"
-    if [[ "$code_v1" == "200" || "$code_health" == "200" ]]; then
+    api_state="$(firecrawl_service_state "$compose_file" "api" || echo unknown)"
+    searx_state="$(firecrawl_service_state "$compose_file" "searxng" || echo unknown)"
+
+    # If searxng exits during bootstrap, self-heal by restarting searxng + api.
+    if [[ "$searx_state" == "exited" && "$searx_restart_attempts" -lt 3 ]]; then
+      searx_restart_attempts=$((searx_restart_attempts + 1))
+      echo "  searxng container exited; attempting recovery (${searx_restart_attempts}/3)..."
+      (
+        cd "$FIRECRAWL_DIR"
+        "${compose_cmd[@]}" -f "$compose_file" restart searxng api >/dev/null 2>&1 || true
+      )
+      sleep 3
+      continue
+    fi
+
+    if [[ ("$code_v1" == "200" || "$code_health" == "200") && "$api_state" == "running" && "$searx_state" == "running" ]]; then
       echo "✓ Firecrawl healthy at http://127.0.0.1:3002"
       return 0
     fi
@@ -532,8 +548,13 @@ EOF
     # with any normal HTTP status, the API is reachable and ready for WHOX.
     case "$code_root" in
       200|301|302|400|401|403|404|405)
+        if [[ "$api_state" != "running" || "$searx_state" != "running" ]]; then
+          # Reachable but degraded; don't accept success yet.
+          :
+        else
         echo "✓ Firecrawl reachable at http://127.0.0.1:3002 (root HTTP ${code_root})"
         return 0
+        fi
         ;;
     esac
 
@@ -548,9 +569,6 @@ EOF
     fi
 
     if (( elapsed % 10 == 0 )); then
-      local api_state searx_state
-      api_state="$(firecrawl_service_state "$compose_file" "api" || echo unknown)"
-      searx_state="$(firecrawl_service_state "$compose_file" "searxng" || echo unknown)"
       echo "  still waiting... ${elapsed}s elapsed (v1=${code_v1}, health=${code_health}, root=${code_root}, api=${api_state}, searxng=${searx_state})"
     fi
     sleep "$tick"
@@ -584,16 +602,26 @@ verify_installation_ready() {
 
   local code_v1 code_root
   code_v1="$(firecrawl_http_code "/v1/health")"
+  local code_health
+  code_health="$(firecrawl_http_code "/health")"
   code_root="$(firecrawl_http_code "/")"
-  if [[ "$code_v1" == "200" ]]; then
+  local api_state searx_state
+  api_state="$(firecrawl_service_state "docker-compose.runtime.yaml" "api" || echo unknown)"
+  searx_state="$(firecrawl_service_state "docker-compose.runtime.yaml" "searxng" || echo unknown)"
+  if [[ ("$code_v1" == "200" || "$code_health" == "200") && "$api_state" == "running" && "$searx_state" == "running" ]]; then
     echo "✓ Firecrawl API healthy"
   else
     case "$code_root" in
       200|301|302|400|401|403|404|405)
-        echo "✓ Firecrawl API reachable (root HTTP ${code_root})"
+        if [[ "$api_state" == "running" && "$searx_state" == "running" ]]; then
+          echo "✓ Firecrawl API reachable (root HTTP ${code_root})"
+        else
+          echo "Firecrawl reachable but degraded (root=${code_root}, api=${api_state}, searxng=${searx_state})." >&2
+          return 1
+        fi
         ;;
       *)
-        echo "Firecrawl health check failed during final verification (health=${code_v1}, root=${code_root})." >&2
+        echo "Firecrawl health check failed during final verification (v1=${code_v1}, health=${code_health}, root=${code_root}, api=${api_state}, searxng=${searx_state})." >&2
         return 1
         ;;
     esac
