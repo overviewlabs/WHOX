@@ -263,6 +263,52 @@ ensure_firecrawl_stack() {
   local model_name="$3"
   local health_timeout="${WHOX_FIRECRAWL_HEALTH_TIMEOUT:-600}"
 
+  write_safe_searxng_settings() {
+    mkdir -p "${FIRECRAWL_DIR}/searxng"
+    cat > "${FIRECRAWL_DIR}/searxng/settings.yml" <<'EOF'
+general:
+  debug: false
+  instance_name: "firecrawl-searxng"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "changeme"
+  limiter: false
+  image_proxy: false
+
+ui:
+  default_theme: simple
+
+outgoing:
+  request_timeout: 6.0
+  enable_http2: true
+
+engines:
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: brave
+    engine: brave
+    shortcut: br
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+EOF
+  }
+
   echo -e "${CYAN}Provisioning Firecrawl (self-hosted web backend)...${NC}"
 
   if ! command -v docker >/dev/null 2>&1; then
@@ -352,6 +398,8 @@ ensure_firecrawl_stack() {
   if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
     mkdir -p "${FIRECRAWL_DIR}/searxng"
     cp "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" "${FIRECRAWL_DIR}/searxng/settings.yml"
+  elif [[ ! -f "${FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
+    write_safe_searxng_settings
   fi
 
   local searx_secret
@@ -532,9 +580,17 @@ EOF
     if [[ "$searx_state" == "exited" && "$searx_restart_attempts" -lt 3 ]]; then
       searx_restart_attempts=$((searx_restart_attempts + 1))
       echo "  searxng container exited; attempting recovery (${searx_restart_attempts}/3)..."
+      if [[ "$searx_restart_attempts" -eq 2 ]]; then
+        echo "  applying safe SearXNG config fallback and recreating containers..."
+        write_safe_searxng_settings
+      fi
       (
         cd "$FIRECRAWL_DIR"
-        "${compose_cmd[@]}" -f "$compose_file" restart searxng api >/dev/null 2>&1 || true
+        if [[ "$searx_restart_attempts" -ge 2 ]]; then
+          "${compose_cmd[@]}" -f "$compose_file" up -d --force-recreate --no-build searxng api >/dev/null 2>&1 || true
+        else
+          "${compose_cmd[@]}" -f "$compose_file" restart searxng api >/dev/null 2>&1 || true
+        fi
       )
       sleep 3
       continue
