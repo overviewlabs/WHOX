@@ -286,6 +286,27 @@ def _firecrawl_v1_search(query: str, limit: int, category: str = "general") -> d
         return resp.json()
 
 
+def _firecrawl_v2_search(query: str, limit: int, category: str = "general", pageno: int = 1) -> dict:
+    """Call Firecrawl v2 search endpoint with native category + pageno support."""
+    base_url, headers = _get_firecrawl_http_config()
+    payload: Dict[str, Any] = {
+        "query": query,
+        "limit": max(1, min(int(limit or 5), 100)),
+        "category": category,
+        "pageno": max(1, int(pageno or 1)),
+        "sources": [{"type": "web"}],
+    }
+
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.post(
+            f"{base_url}/v2/search",
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 def _get_searxng_base_url() -> str:
     """Return configured direct SearXNG URL, if present."""
     return (
@@ -539,7 +560,7 @@ def _extract_web_search_results(response: Any) -> List[Dict[str, Any]]:
     return []
 
 
-_WEB_SEARCH_CATEGORIES = {"general", "images", "videos", "news"}
+_WEB_SEARCH_CATEGORIES = {"general", "images", "videos", "news", "map"}
 _IMAGE_URL_KEYS = (
     "src",
     "image",
@@ -1263,7 +1284,7 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
     Args:
         query (str): The search query to look up
         limit (int): Maximum number of results per page (default: 5)
-        category (str): Search category (general, images, videos, news)
+        category (str): Search category (general, images, videos, news, map)
         pageno (int): 1-based page index
     
     Returns:
@@ -1381,16 +1402,38 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
             _debug.save()
             return result_json
 
-        logger.info("Searching the web for: '%s' (limit: %d, category: %s)", query, limit, normalized_category)
-        category_query = query
-        if normalized_category == "images":
-            category_query = f"!images {query}"
-        elif normalized_category == "videos":
-            category_query = f"!videos {query}"
-        elif normalized_category == "news":
-            category_query = f"!news {query}"
+        logger.info("Searching the web for: '%s' (limit: %d, category: %s, page: %d)", query, limit, normalized_category, page)
+        used_v2 = False
+        search_backend_detail = "firecrawl_v1"
+        firecrawl_limit = fetch_limit
 
-        response = _firecrawl_v1_search(query=category_query, limit=fetch_limit)
+        try:
+            response = _firecrawl_v2_search(
+                query=query,
+                limit=per_page,
+                category=normalized_category,
+                pageno=page,
+            )
+            used_v2 = True
+            search_backend_detail = "firecrawl_v2"
+            firecrawl_limit = per_page
+        except Exception as v2_error:
+            logger.warning("Firecrawl v2 search failed, falling back to v1/search: %s", v2_error)
+            if normalized_category == "map":
+                return json.dumps({
+                    "success": False,
+                    "error": "category='map' requires Firecrawl v2/search support. v2 request failed."
+                }, ensure_ascii=False)
+
+            category_query = query
+            if normalized_category == "images":
+                category_query = f"!images {query}"
+            elif normalized_category == "videos":
+                category_query = f"!videos {query}"
+            elif normalized_category == "news":
+                category_query = f"!news {query}"
+
+            response = _firecrawl_v1_search(query=category_query, limit=fetch_limit)
 
         web_results = _extract_web_search_results(response)
         results_count = len(web_results)
@@ -1398,10 +1441,10 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
 
         if normalized_category == "images":
             # Enforce src-only image links for actual image files.
-            images = _shape_image_search_results(web_results, limit=fetch_limit)
+            images = _shape_image_search_results(web_results, limit=firecrawl_limit)
             # Firecrawl+SearXNG often returns web pages for image queries. In that
             # case, scrape top pages and extract og:image/markdown image URLs.
-            if len(images) < fetch_limit:
+            if (not used_v2) and len(images) < fetch_limit:
                 visited_pages: set[str] = set()
                 for row in web_results:
                     page_url = str(row.get("url") or "").strip()
@@ -1437,6 +1480,7 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
                 "success": True,
                 "category": "images",
                 "image_src_only": True,
+                "search_backend": search_backend_detail,
                 "pageno": page,
                 "per_page": per_page,
                 "data": {
@@ -1460,6 +1504,7 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
             response_data = {
                 "success": True,
                 "category": normalized_category,
+                "search_backend": search_backend_detail,
                 "pageno": page,
                 "per_page": per_page,
                 "data": {
@@ -2365,7 +2410,7 @@ from tools.registry import registry
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web with an explicit category. Supported categories: general, images, videos, news. For category=images, returns image src links only.",
+    "description": "Search the web with an explicit category. Supported categories: general, images, videos, news, map. For category=images, returns image src links only.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -2375,7 +2420,7 @@ WEB_SEARCH_SCHEMA = {
             },
             "category": {
                 "type": "string",
-                "enum": ["general", "images", "videos", "news"],
+                "enum": ["general", "images", "videos", "news", "map"],
                 "description": "Search category. Use images to return image source links."
             },
             "pageno": {

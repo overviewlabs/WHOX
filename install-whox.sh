@@ -687,32 +687,29 @@ if [[ -d "$WHOX_HOME" ]]; then
   echo ""
 fi
 
-QWEN_KEY="$(prompt_required "1/5 Qwen-3.5-397b-a17b API Key" 0)"
+QWEN_KEY="$(prompt_required "1/3 Qwen-3.5-397b-a17b API Key" 0)"
 echo "✓ Step 1 complete"
 echo ""
 
-TG_BOT_TOKEN="$(prompt_required "2/5 Telegram Bot Token" 0)"
+TG_BOT_TOKEN="$(prompt_required "2/3 Telegram Bot Token" 0)"
 TG_BOT_TOKEN="$(echo "$TG_BOT_TOKEN" | tr -d '[:space:]')"
 echo "✓ Step 2 complete"
 echo ""
 
-TELEGRAM_ALLOWED_USERS_INPUT="$(read -r -p "3/5 Approved Telegram User IDs (optional, comma-separated): " _tid && echo "${_tid}")"
+while true; do
+  TELEGRAM_ALLOWED_USERS_INPUT="$(prompt_required "3/3 Telegram User ID (single numeric ID)" 0)"
+  TELEGRAM_ALLOWED_USERS_INPUT="$(echo "$TELEGRAM_ALLOWED_USERS_INPUT" | tr -d '[:space:]')"
+  if [[ "$TELEGRAM_ALLOWED_USERS_INPUT" =~ ^[0-9]+$ ]]; then
+    TELEGRAM_ALLOWED_USERS="$TELEGRAM_ALLOWED_USERS_INPUT"
+    break
+  fi
+  echo "Please enter exactly one numeric Telegram user ID (digits only)."
+done
 echo "✓ Step 3 complete"
 echo ""
 
-VPS_DOMAIN_INPUT="$(read -r -p "4/5 VPS public base domain (optional, example: whox.ai): " _dom && echo "${_dom}")"
-echo "✓ Step 4 complete"
-echo ""
-
-TZ_INPUT="$(read -r -p "5/5 Timezone [${DEFAULT_TZ}]: " _tz && echo "${_tz:-$DEFAULT_TZ}")"
-echo "✓ Step 5 complete"
-echo ""
-
-VPS_DOMAIN_INPUT="$(echo "$VPS_DOMAIN_INPUT" | tr '[:upper:]' '[:lower:]' | sed 's#^https\?://##;s#/$##')"
-TELEGRAM_ALLOWED_USERS="$(echo "$TELEGRAM_ALLOWED_USERS_INPUT" | tr -d '[:space:]' | sed 's/^,*//;s/,*$//;s/,,*/,/g')"
-TZ_INPUT="$(echo "$TZ_INPUT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-[[ -z "$VPS_DOMAIN_INPUT" ]] && VPS_DOMAIN_INPUT="$DEFAULT_DOMAIN"
-[[ -z "$TZ_INPUT" ]] && TZ_INPUT="$DEFAULT_TZ"
+VPS_DOMAIN_INPUT="$DEFAULT_DOMAIN"
+TZ_INPUT="$DEFAULT_TZ"
 
 echo -e "${CYAN}Validating Telegram bot token...${NC}"
 if validate_telegram_token "$TG_BOT_TOKEN"; then
@@ -722,10 +719,6 @@ else
   exit 1
 fi
 echo ""
-
-echo ""
-echo -e "${CYAN}Feature setup${NC}"
-echo "Choose what to enable for CLI + Telegram"
 
 ENABLE_WEB=1
 ENABLE_BROWSER=1
@@ -743,27 +736,6 @@ ENABLE_DELEGATION=1
 ENABLE_TTS=1
 ENABLE_MOA=0
 ENABLE_RL=0
-
-if prompt_yes_no "Use recommended feature profile" "y"; then
-  :
-else
-  if prompt_yes_no "Enable web search and extraction" "y"; then ENABLE_WEB=1; else ENABLE_WEB=0; fi
-  if prompt_yes_no "Enable browser automation" "y"; then ENABLE_BROWSER=1; else ENABLE_BROWSER=0; fi
-  if prompt_yes_no "Enable terminal commands" "y"; then ENABLE_TERMINAL=1; else ENABLE_TERMINAL=0; fi
-  if prompt_yes_no "Enable file operations" "y"; then ENABLE_FILE=1; else ENABLE_FILE=0; fi
-  if prompt_yes_no "Enable code execution" "y"; then ENABLE_CODE_EXECUTION=1; else ENABLE_CODE_EXECUTION=0; fi
-  if prompt_yes_no "Enable vision/image analysis" "y"; then ENABLE_VISION=1; else ENABLE_VISION=0; fi
-  if prompt_yes_no "Enable image generation/editing" "y"; then ENABLE_IMAGE_GEN=1; else ENABLE_IMAGE_GEN=0; fi
-  if prompt_yes_no "Enable memory across sessions" "y"; then ENABLE_MEMORY=1; else ENABLE_MEMORY=0; fi
-  if prompt_yes_no "Enable session search" "y"; then ENABLE_SESSION_SEARCH=1; else ENABLE_SESSION_SEARCH=0; fi
-  if prompt_yes_no "Enable skills management" "y"; then ENABLE_SKILLS=1; else ENABLE_SKILLS=0; fi
-  if prompt_yes_no "Enable todo/task planning" "y"; then ENABLE_TODO=1; else ENABLE_TODO=0; fi
-  if prompt_yes_no "Enable scheduled cron jobs" "y"; then ENABLE_CRONJOB=1; else ENABLE_CRONJOB=0; fi
-  if prompt_yes_no "Enable delegation/sub-agents" "y"; then ENABLE_DELEGATION=1; else ENABLE_DELEGATION=0; fi
-  if prompt_yes_no "Enable text-to-speech" "n"; then ENABLE_TTS=1; else ENABLE_TTS=0; fi
-  if prompt_yes_no "Enable mixture-of-agents mode" "n"; then ENABLE_MOA=1; else ENABLE_MOA=0; fi
-  if prompt_yes_no "Enable RL toolset" "n"; then ENABLE_RL=1; else ENABLE_RL=0; fi
-fi
 
 echo ""
 install_prerequisites
