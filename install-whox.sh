@@ -178,12 +178,16 @@ firecrawl_service_state() {
   local state="unknown"
   (
     cd "$FIRECRAWL_DIR"
-    # Works on both docker compose v2 and docker-compose v1 by using plain docker inspect.
     local cid
-    cid="$(docker ps -aq --filter "label=com.docker.compose.project=firecrawl" --filter "label=com.docker.compose.service=${service}" | head -n1)"
+    # Prefer the current compose-managed container for this service.
+    cid="$("${compose_cmd[@]}" -f "$compose_file" ps -q "$service" 2>/dev/null | tail -n1)"
     if [[ -z "$cid" ]]; then
-      # Fallback: parse compose ps output if labels are absent.
-      cid="$("${compose_cmd[@]}" -f "$compose_file" ps -q "$service" 2>/dev/null | head -n1)"
+      # Fall back to the newest running container with matching compose labels.
+      cid="$(docker ps -q --filter "label=com.docker.compose.project=firecrawl" --filter "label=com.docker.compose.service=${service}" | tail -n1)"
+    fi
+    if [[ -z "$cid" ]]; then
+      # Final fallback: newest container for the service, even if exited.
+      cid="$(docker ps -aq --filter "label=com.docker.compose.project=firecrawl" --filter "label=com.docker.compose.service=${service}" | tail -n1)"
     fi
     if [[ -n "$cid" ]]; then
       state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo unknown)"
