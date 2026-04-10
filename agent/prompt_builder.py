@@ -178,6 +178,7 @@ CAPABILITY_ROUTING_GUIDANCE = (
     "- If a listed skill clearly matches the request, load it first with skill_view(name) and follow it.\n"
     "- Combine capabilities when needed (e.g., browser + file, web + extract, cronjob + web) instead of stopping early.\n"
     "- Use browser_download to save files discovered during browser sessions (PDFs, docs, archives, media) and return local paths.\n"
+    "- Choose web_search category from intent: images for image/photo/picture lookups, videos for watch/video requests, news for latest/breaking/news requests, map for map/directions/nearby/location requests, otherwise general.\n"
     "- For requests like 'show me an image/photo/picture of X', use web_search with category='images' and return real source image URLs.\n"
     "- Do NOT call image_generate for image lookup/search requests.\n"
     "- Only call image_generate when the user explicitly asks to create, generate, or edit an image.\n"

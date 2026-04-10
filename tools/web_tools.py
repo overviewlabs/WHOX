@@ -583,6 +583,53 @@ def _normalize_search_category(category: str) -> str:
     return value if value in _WEB_SEARCH_CATEGORIES else "general"
 
 
+def _infer_search_category_from_query(query: str) -> str:
+    """
+    Infer best-fit web_search category from natural-language query intent.
+
+    This is a fail-safe for cases where the model passes category='general'
+    even when user intent clearly targets a specific vertical.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return "general"
+
+    # Explicit operator hints.
+    if q.startswith("!images "):
+        return "images"
+    if q.startswith("!videos "):
+        return "videos"
+    if q.startswith("!news "):
+        return "news"
+
+    map_patterns = (
+        r"\bmap\b", r"\bmaps\b", r"\bnear me\b", r"\bnearby\b", r"\bdirections?\b",
+        r"\broute\b", r"\bdistance\b", r"\bclosest\b", r"\blocation\b",
+    )
+    image_patterns = (
+        r"\bimage\b", r"\bimages\b", r"\bphoto\b", r"\bphotos\b", r"\bpicture\b",
+        r"\bpictures\b", r"\bwallpaper\b", r"\bshow me\b.*\b(image|photo|picture)\b",
+    )
+    video_patterns = (
+        r"\bvideo\b", r"\bvideos\b", r"\bwatch\b", r"\bclip\b", r"\bclips\b",
+        r"\byoutube\b", r"\btrailer\b",
+    )
+    news_patterns = (
+        r"\bnews\b", r"\bheadline\b", r"\bheadlines\b", r"\bbreaking\b",
+        r"\blatest\b", r"\brecent\b", r"\bcurrent events?\b", r"\bupdate(?:s)?\b",
+    )
+
+    if any(re.search(p, q) for p in map_patterns):
+        return "map"
+    if any(re.search(p, q) for p in image_patterns):
+        return "images"
+    if any(re.search(p, q) for p in video_patterns):
+        return "videos"
+    if any(re.search(p, q) for p in news_patterns):
+        return "news"
+    return "general"
+
+
 def _looks_like_image_url(url: str) -> bool:
     lower = (url or "").lower()
     if not (lower.startswith("http://") or lower.startswith("https://")):
@@ -1314,6 +1361,8 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
             "category": category,
             "pageno": pageno,
         },
+        "resolved_category": None,
+        "category_inferred": False,
         "error": None,
         "results_count": 0,
         "original_response_size": 0,
@@ -1326,6 +1375,13 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
             return json.dumps({"error": "Interrupted", "success": False})
 
         normalized_category = _normalize_search_category(category)
+        inferred_category = _infer_search_category_from_query(query)
+        # Fail-safe: if model submitted general but intent indicates a better category,
+        # automatically route to that category.
+        if normalized_category == "general" and inferred_category != "general":
+            normalized_category = inferred_category
+            debug_call_data["category_inferred"] = True
+        debug_call_data["resolved_category"] = normalized_category
         page = max(1, int(pageno or 1))
         per_page = max(1, min(int(limit or 5), 20))
         # Firecrawl v1/search doesn't expose page/pageno. Emulate pagination
