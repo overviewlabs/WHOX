@@ -298,6 +298,23 @@ ensure_firecrawl_stack() {
     return 1
   }
 
+  write_minimal_searxng_settings() {
+    mkdir -p "${FIRECRAWL_DIR}/searxng"
+    cat > "${FIRECRAWL_DIR}/searxng/settings.yml" <<'EOF'
+use_default_settings: true
+general:
+  instance_name: firecrawl-searxng
+  debug: false
+search:
+  safe_search: 0
+  autocomplete: "duckduckgo"
+  default_lang: "en-US"
+server:
+  limiter: false
+  image_proxy: true
+EOF
+  }
+
   echo -e "${CYAN}Provisioning Firecrawl (self-hosted web backend)...${NC}"
 
   if ! command -v docker >/dev/null 2>&1; then
@@ -385,10 +402,13 @@ ensure_firecrawl_stack() {
   fi
 
   if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-    restore_bundled_searxng_settings
+    restore_bundled_searxng_settings || {
+      echo "Falling back to minimal compatible SearXNG settings..."
+      write_minimal_searxng_settings
+    }
   elif [[ ! -f "${FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-    echo "Bundled SearXNG settings snapshot is missing." >&2
-    return 1
+    echo "Bundled SearXNG settings snapshot is missing; generating minimal compatible settings..."
+    write_minimal_searxng_settings
   else
     sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
   fi
@@ -577,9 +597,19 @@ EOF
     if [[ "$searx_state" == "exited" && "$searx_restart_attempts" -lt 3 ]]; then
       searx_restart_attempts=$((searx_restart_attempts + 1))
       echo "  searxng container exited; attempting recovery (${searx_restart_attempts}/3)..."
+      (
+        cd "$FIRECRAWL_DIR"
+        "${compose_cmd[@]}" -f "$compose_file" logs --tail=25 searxng 2>/dev/null || true
+      )
       if [[ "$searx_restart_attempts" -eq 2 ]]; then
         echo "  restoring bundled SearXNG snapshot and recreating containers..."
-        restore_bundled_searxng_settings
+        restore_bundled_searxng_settings || {
+          echo "  bundled snapshot unavailable; applying minimal SearXNG settings..."
+          write_minimal_searxng_settings
+        }
+      elif [[ "$searx_restart_attempts" -eq 3 ]]; then
+        echo "  applying minimal SearXNG settings and recreating containers..."
+        write_minimal_searxng_settings
       fi
       (
         cd "$FIRECRAWL_DIR"
@@ -800,6 +830,17 @@ send_telegram_boot_ping() {
 }
 
 resolve_setup_dir() {
+  # Rebind snapshot paths to the active setup directory unless explicitly overridden.
+  _refresh_snapshot_paths() {
+    if [[ -n "${WHOX_SNAPSHOT_DIR:-}" ]]; then
+      SNAPSHOT_DIR="${WHOX_SNAPSHOT_DIR}"
+    else
+      SNAPSHOT_DIR="${SETUP_DIR}/snapshot"
+    fi
+    SNAPSHOT_RUNTIME_DIR="${SNAPSHOT_DIR}/runtime"
+    SNAPSHOT_FIRECRAWL_DIR="${SNAPSHOT_DIR}/firecrawl"
+  }
+
   # Normal path: running from a cloned repo.
   if [[ -f "${SCRIPT_DIR}/setup-whox.sh" ]]; then
     if [[ -d "${SCRIPT_DIR}/.git" ]]; then
@@ -809,6 +850,7 @@ resolve_setup_dir() {
     fi
     SETUP_DIR="$SCRIPT_DIR"
     REPO_ENV_FILE="${SETUP_DIR}/.env"
+    _refresh_snapshot_paths
     return 0
   fi
 
@@ -830,6 +872,7 @@ resolve_setup_dir() {
 
   SETUP_DIR="$INSTALL_SRC_DIR"
   REPO_ENV_FILE="${SETUP_DIR}/.env"
+  _refresh_snapshot_paths
   echo "✓ Bootstrap complete"
   echo ""
 }
