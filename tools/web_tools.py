@@ -615,8 +615,14 @@ def _infer_search_category_from_query(query: str) -> str:
         r"\byoutube\b", r"\btrailer\b",
     )
     news_patterns = (
-        r"\bnews\b", r"\bheadline\b", r"\bheadlines\b", r"\bbreaking\b",
-        r"\blatest\b", r"\brecent\b", r"\bcurrent events?\b", r"\bupdate(?:s)?\b",
+        r"\bnews\b",
+        r"\bheadline\b",
+        r"\bheadlines\b",
+        r"\bbreaking\b",
+        r"\bcurrent events?\b",
+        r"\blatest news\b",
+        r"\brecent news\b",
+        r"\bnews updates?\b",
     )
 
     if any(re.search(p, q) for p in map_patterns):
