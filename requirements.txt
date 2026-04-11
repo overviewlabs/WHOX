@@ -18,7 +18,6 @@ PyJWT[crypto]
 debugpy
 
 # Web tools
-firecrawl-py
 parallel-web>=0.4.2
 
 # Image generation

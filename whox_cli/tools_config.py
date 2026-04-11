@@ -199,57 +199,16 @@ TOOL_CATEGORIES = {
     },
     "web": {
         "name": "Web Search & Extract",
-        "setup_title": "Select Search Provider",
-        "setup_note": "A free DuckDuckGo search skill is also included — skip this if you don't need a premium provider.",
+        "setup_title": "Web Search Configuration",
+        "setup_note": "WHOX uses SearXNG as the only web search backend.",
         "icon": "🔍",
         "providers": [
             {
-                "name": "Nous Subscription",
-                "tag": "Managed Firecrawl billed to your subscription",
-                "web_backend": "firecrawl",
-                "env_vars": [],
-                "requires_nous_auth": True,
-                "managed_nous_feature": "web",
-                "override_env_vars": ["FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"],
-            },
-            {
-                "name": "Firecrawl Cloud",
-                "tag": "Hosted service - search, extract, and crawl",
-                "web_backend": "firecrawl",
+                "name": "SearXNG",
+                "tag": "Self-hosted metasearch backend (required)",
+                "web_backend": "searxng",
                 "env_vars": [
-                    {"key": "FIRECRAWL_API_KEY", "prompt": "Firecrawl API key", "url": "https://firecrawl.dev"},
-                ],
-            },
-            {
-                "name": "Exa",
-                "tag": "AI-native search and contents",
-                "web_backend": "exa",
-                "env_vars": [
-                    {"key": "EXA_API_KEY", "prompt": "Exa API key", "url": "https://exa.ai"},
-                ],
-            },
-            {
-                "name": "Parallel",
-                "tag": "AI-native search and extract",
-                "web_backend": "parallel",
-                "env_vars": [
-                    {"key": "PARALLEL_API_KEY", "prompt": "Parallel API key", "url": "https://parallel.ai"},
-                ],
-            },
-            {
-                "name": "Tavily",
-                "tag": "AI-native search, extract, and crawl",
-                "web_backend": "tavily",
-                "env_vars": [
-                    {"key": "TAVILY_API_KEY", "prompt": "Tavily API key", "url": "https://app.tavily.com/home"},
-                ],
-            },
-            {
-                "name": "Firecrawl Self-Hosted",
-                "tag": "Free - run your own instance",
-                "web_backend": "firecrawl",
-                "env_vars": [
-                    {"key": "FIRECRAWL_API_URL", "prompt": "Your Firecrawl instance URL (e.g., http://localhost:3002)"},
+                    {"key": "SEARXNG_API_URL", "prompt": "Your SearXNG instance URL (e.g., http://127.0.0.1:18080)"},
                 ],
             },
         ],

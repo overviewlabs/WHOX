@@ -13,11 +13,10 @@ DEFAULT_MODEL="qwen/qwen3.5-397b-a17b"
 DEFAULT_BASE_URL="https://integrate.api.nvidia.com/v1"
 DEFAULT_TZ="America/New_York"
 DEFAULT_DOMAIN=""
-FIRECRAWL_REPO_URL="${WHOX_FIRECRAWL_REPO_URL:-https://github.com/mendableai/firecrawl.git}"
-FIRECRAWL_DIR="${WHOX_FIRECRAWL_DIR:-$HOME/firecrawl}"
+SEARXNG_DIR="${WHOX_SEARXNG_DIR:-${WHOX_HOME}/searxng}"
 SNAPSHOT_DIR="${WHOX_SNAPSHOT_DIR:-$SCRIPT_DIR/snapshot}"
 SNAPSHOT_RUNTIME_DIR="${SNAPSHOT_DIR}/runtime"
-SNAPSHOT_FIRECRAWL_DIR="${SNAPSHOT_DIR}/firecrawl"
+SNAPSHOT_SEARXNG_DIR="${SNAPSHOT_DIR}/searxng"
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -97,15 +96,15 @@ full_wipe_existing_install() {
     fi
   fi
 
-  # Best-effort shutdown of existing Firecrawl stack.
-  if [[ -d "$FIRECRAWL_DIR" ]]; then
+  # Best-effort shutdown of existing SearXNG stack.
+  if [[ -d "$SEARXNG_DIR" ]]; then
     (
-      cd "$FIRECRAWL_DIR" 2>/dev/null || exit 0
+      cd "$SEARXNG_DIR" 2>/dev/null || exit 0
       if command -v docker >/dev/null 2>&1; then
         if docker compose version >/dev/null 2>&1; then
-          docker compose -f docker-compose.runtime.yaml down -v --remove-orphans >/dev/null 2>&1 || true
+          docker compose -f docker-compose.yaml down -v --remove-orphans >/dev/null 2>&1 || true
         elif command -v docker-compose >/dev/null 2>&1; then
-          docker-compose -f docker-compose.runtime.yaml down -v --remove-orphans >/dev/null 2>&1 || true
+          docker-compose -f docker-compose.yaml down -v --remove-orphans >/dev/null 2>&1 || true
         fi
       fi
     ) || true
@@ -113,7 +112,7 @@ full_wipe_existing_install() {
 
   # Remove runtime/data directories for a true fresh install.
   rm -rf "$WHOX_HOME"
-  rm -rf "$FIRECRAWL_DIR"
+  rm -rf "$SEARXNG_DIR"
   rm -f "$HOME/.local/bin/whox"
 
   echo "✓ Previous WHOX install removed"
@@ -136,7 +135,7 @@ install_prerequisites() {
     if ! apt-get install -y ca-certificates curl git jq ripgrep python3.11 python3.11-venv >/dev/null 2>&1; then
       apt-get install -y ca-certificates curl git jq ripgrep python3 python3-venv >/dev/null 2>&1 || true
     fi
-    # Docker stack is required by Firecrawl
+    # Docker stack is required by local SearXNG
     if ! command -v docker >/dev/null 2>&1; then
       if ! apt-get install -y docker.io docker-compose-plugin >/dev/null; then
         apt-get install -y docker.io docker-compose >/dev/null || true
@@ -162,10 +161,11 @@ install_prerequisites() {
   echo "✓ Prerequisites checked"
 }
 
-firecrawl_http_code() {
+searxng_http_code() {
   local path="$1"
+  local port="${WHOX_SEARXNG_HOST_PORT_RESOLVED:-18080}"
   local code=""
-  code="$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:3002${path}" 2>/dev/null || true)"
+  code="$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
   if [[ ! "$code" =~ ^[0-9]{3}$ ]]; then
     echo "000"
   else
@@ -173,23 +173,17 @@ firecrawl_http_code() {
   fi
 }
 
-firecrawl_service_state() {
+searxng_service_state() {
   local compose_file="$1"
   local service="$2"
   local state="unknown"
   (
-    cd "$FIRECRAWL_DIR"
+    cd "$SEARXNG_DIR"
     local cid
     # Prefer the current compose-managed container for this service.
     cid="$("${compose_cmd[@]}" -f "$compose_file" ps -q "$service" 2>/dev/null | tail -n1)"
-    if [[ -z "$cid" ]]; then
-      # Fall back to the newest running container with matching compose labels.
-      cid="$(docker ps -q --filter "label=com.docker.compose.project=firecrawl" --filter "label=com.docker.compose.service=${service}" | tail -n1)"
-    fi
-    if [[ -z "$cid" ]]; then
-      # Final fallback: newest container for the service, even if exited.
-      cid="$(docker ps -aq --filter "label=com.docker.compose.project=firecrawl" --filter "label=com.docker.compose.service=${service}" | tail -n1)"
-    fi
+    [[ -z "$cid" ]] && cid="$(docker ps -q --filter "label=com.docker.compose.service=${service}" | tail -n1)"
+    [[ -z "$cid" ]] && cid="$(docker ps -aq --filter "label=com.docker.compose.service=${service}" | tail -n1)"
     if [[ -n "$cid" ]]; then
       state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo unknown)"
       echo "$state"
@@ -290,105 +284,35 @@ random_hex_64() {
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
-ensure_firecrawl_stack() {
-  local qwen_key="$1"
-  local base_url="$2"
-  local model_name="$3"
-  local health_timeout="${WHOX_FIRECRAWL_HEALTH_TIMEOUT:-600}"
-  local host_arch
-  host_arch="$(uname -m 2>/dev/null || echo unknown)"
-  local nuq_postgres_image="ghcr.io/firecrawl/nuq-postgres:latest"
-
-  sanitize_searxng_settings() {
-    local settings_file="$1"
-    [[ -f "$settings_file" ]] || return 0
-
-    # SearXNG 2026.x rejects the legacy categories_as_tabs mapping that uses
-    # null values for each category. Drop that block and normalize one known
-    # null scalar from the bundled snapshot.
-    awk '
-      BEGIN {skip=0}
-      /^categories_as_tabs:[[:space:]]*$/ {skip=1; next}
-      skip && /^engines:[[:space:]]*$/ {skip=0}
-      !skip {
-        gsub(/official_api_documentation: null/, "official_api_documentation: false")
-        print
-      }
-      !skip && /^engines:[[:space:]]*$/ {next}
-    ' "$settings_file" > "${settings_file}.tmp"
-    mv "${settings_file}.tmp" "$settings_file"
-  }
-
-  restore_bundled_searxng_settings() {
-    mkdir -p "${FIRECRAWL_DIR}/searxng"
-    if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-      cp "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" "${FIRECRAWL_DIR}/searxng/settings.yml"
-      sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
-      return 0
-    fi
-    echo "Bundled SearXNG settings snapshot is missing." >&2
-    return 1
-  }
+ensure_searxng_stack() {
+  local health_timeout="${WHOX_SEARXNG_HEALTH_TIMEOUT:-180}"
 
   write_minimal_searxng_settings() {
-    mkdir -p "${FIRECRAWL_DIR}/searxng"
-    cat > "${FIRECRAWL_DIR}/searxng/settings.yml" <<'EOF'
+    mkdir -p "${SEARXNG_DIR}"
+    cat > "${SEARXNG_DIR}/settings.yml" <<'EOF'
 use_default_settings: true
 general:
-  instance_name: firecrawl-searxng
-  debug: false
+  instance_name: whox-searxng
 search:
   safe_search: 0
-  autocomplete: "duckduckgo"
-  default_lang: "en-US"
 server:
   limiter: false
   image_proxy: true
 EOF
   }
 
-  ensure_nuq_amd64_emulation() {
-    if [[ "$host_arch" != "aarch64" && "$host_arch" != "arm64" ]]; then
-      return 0
-    fi
-    # nuq-postgres is amd64-only at the moment; make sure ARM hosts can execute it.
-    if docker run --rm --platform linux/amd64 ghcr.io/firecrawl/nuq-postgres:latest true >/dev/null 2>&1; then
-      return 0
-    fi
-    echo "ARM host detected; enabling amd64 emulation for nuq-postgres..."
-    if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
-      apt-get update -y >/dev/null || true
-      apt-get install -y qemu-user-static binfmt-support >/dev/null || true
-    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get update -y >/dev/null || true
-      sudo apt-get install -y qemu-user-static binfmt-support >/dev/null || true
-    fi
-    if [[ "$(id -u)" -eq 0 ]]; then
-      docker run --privileged --rm tonistiigi/binfmt --install amd64 >/dev/null 2>&1 || true
-    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-      sudo docker run --privileged --rm tonistiigi/binfmt --install amd64 >/dev/null 2>&1 || true
-    fi
-    if ! docker run --rm --platform linux/amd64 ghcr.io/firecrawl/nuq-postgres:latest true >/dev/null 2>&1; then
-      echo "Failed to enable amd64 emulation for nuq-postgres on ARM host." >&2
-      echo "Install qemu-user-static + binfmt and ensure Docker can run linux/amd64 images." >&2
-      return 1
-    fi
-    return 0
-  }
-
-  echo -e "${CYAN}Provisioning Firecrawl (self-hosted web backend)...${NC}"
+  echo -e "${CYAN}Provisioning SearXNG (web search backend)...${NC}"
 
   if ! command -v docker >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
       echo "Docker not found. Installing docker runtime and compose..."
       apt-get update -y >/dev/null
       if ! apt-get install -y docker.io docker-compose-plugin >/dev/null; then
-        echo "docker-compose-plugin unavailable on this image, trying docker-compose package..."
-        apt-get install -y docker.io docker-compose >/dev/null
+        apt-get install -y docker.io docker-compose >/dev/null || true
       fi
       systemctl enable --now docker >/dev/null 2>&1 || true
     else
-      echo "Docker is required for Firecrawl but was not found and cannot be auto-installed in this context." >&2
+      echo "Docker is required for local SearXNG but was not found and cannot be auto-installed in this context." >&2
       return 1
     fi
   fi
@@ -403,107 +327,21 @@ EOF
     sleep 2
   fi
   if ! docker info >/dev/null 2>&1; then
-    echo "Docker daemon is not running. Unable to start Firecrawl." >&2
+    echo "Docker daemon is not running. Unable to start SearXNG." >&2
     return 1
   fi
 
-  if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
-    if ! ensure_nuq_amd64_emulation; then
-      return 1
-    fi
-  fi
-
-  # Prefer Compose v2 plugin (supports modern compose files with top-level `name:`).
-  # Some Ubuntu images only provide legacy docker-compose v1 from apt.
-  if ! docker compose version >/dev/null 2>&1; then
-    if [[ "$(id -u)" -eq 0 ]] && command -v curl >/dev/null 2>&1; then
-      local arch
-      arch="$(uname -m)"
-      case "$arch" in
-        x86_64|amd64) arch="x86_64" ;;
-        aarch64|arm64) arch="aarch64" ;;
-        *) arch="" ;;
-      esac
-      if [[ -n "$arch" ]]; then
-        echo "Installing Docker Compose v2 plugin..."
-        mkdir -p /usr/local/lib/docker/cli-plugins
-        curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-${arch}" \
-          -o /usr/local/lib/docker/cli-plugins/docker-compose || true
-        chmod +x /usr/local/lib/docker/cli-plugins/docker-compose 2>/dev/null || true
-      fi
-    fi
-  fi
-
   local -a compose_cmd
-  local use_legacy_compose=0
   if docker compose version >/dev/null 2>&1; then
     compose_cmd=(docker compose)
   elif command -v docker-compose >/dev/null 2>&1; then
     compose_cmd=(docker-compose)
-    use_legacy_compose=1
   else
-    if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
-      echo "Docker compose command missing. Installing docker-compose..."
-      apt-get update -y >/dev/null
-      apt-get install -y docker-compose >/dev/null || true
-    fi
-    if docker compose version >/dev/null 2>&1; then
-      compose_cmd=(docker compose)
-    elif command -v docker-compose >/dev/null 2>&1; then
-      compose_cmd=(docker-compose)
-      use_legacy_compose=1
-    else
-      echo "Docker Compose is required but not available after installation attempts." >&2
-      return 1
-    fi
+    echo "Docker Compose is required but not available after installation attempts." >&2
+    return 1
   fi
 
-  if [[ -d "${FIRECRAWL_DIR}/.git" ]]; then
-    echo "Updating Firecrawl repo..."
-    git -C "$FIRECRAWL_DIR" fetch --depth=1 origin main >/dev/null 2>&1 || true
-    git -C "$FIRECRAWL_DIR" reset --hard origin/main >/dev/null 2>&1 || true
-  else
-    # Recover automatically when a previous failed install left a partial/non-git
-    # directory at FIRECRAWL_DIR (common on interrupted installs).
-    if [[ -d "$FIRECRAWL_DIR" ]]; then
-      if find "$FIRECRAWL_DIR" -mindepth 1 -maxdepth 1 -print -quit >/dev/null 2>&1; then
-        local backup_dir
-        backup_dir="${FIRECRAWL_DIR}.backup.$(date +%Y%m%d-%H%M%S)"
-        echo "Existing non-repo directory found at ${FIRECRAWL_DIR}; moving to ${backup_dir}..."
-        mv "$FIRECRAWL_DIR" "$backup_dir" 2>/dev/null || rm -rf "$FIRECRAWL_DIR"
-      else
-        rmdir "$FIRECRAWL_DIR" 2>/dev/null || true
-      fi
-    fi
-
-    echo "Cloning Firecrawl into ${FIRECRAWL_DIR}..."
-    mkdir -p "$(dirname "$FIRECRAWL_DIR")"
-    if ! git clone --depth=1 "$FIRECRAWL_REPO_URL" "$FIRECRAWL_DIR" >/dev/null; then
-      echo "Firecrawl clone failed. Retrying once with a clean target directory..."
-      rm -rf "$FIRECRAWL_DIR"
-      git clone --depth=1 "$FIRECRAWL_REPO_URL" "$FIRECRAWL_DIR" >/dev/null
-    fi
-  fi
-
-  # Use a deterministic, known-good SearXNG config by default to avoid schema drift
-  # from upstream snapshots. Set WHOX_USE_SEARXNG_SNAPSHOT=1 to opt into snapshot.
-  if [[ "${WHOX_USE_SEARXNG_SNAPSHOT:-0}" == "1" ]]; then
-    if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-      restore_bundled_searxng_settings || {
-        echo "Falling back to minimal compatible SearXNG settings..."
-        write_minimal_searxng_settings
-      }
-    elif [[ ! -f "${FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-      echo "Bundled SearXNG settings snapshot is missing; generating minimal compatible settings..."
-      write_minimal_searxng_settings
-    else
-      sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
-    fi
-  else
-    echo "Using deterministic minimal SearXNG settings for stable startup..."
-    write_minimal_searxng_settings
-  fi
-
+  mkdir -p "$SEARXNG_DIR"
   local searx_secret
   searx_secret="$(random_hex_64)"
   local searx_host_port
@@ -511,274 +349,63 @@ EOF
   WHOX_SEARXNG_HOST_PORT_RESOLVED="$searx_host_port"
   echo "Using SearXNG host port: ${searx_host_port}"
 
-  cat > "${FIRECRAWL_DIR}/.env" <<EOF
-PORT=3002
-HOST=0.0.0.0
-USE_DB_AUTHENTICATION=false
-BULL_AUTH_KEY=CHANGEME
-SEARXNG_ENDPOINT=http://searxng:8080
+  write_minimal_searxng_settings
+  cat > "${SEARXNG_DIR}/.env" <<EOF
 SEARXNG_PORT=${searx_host_port}
 SEARXNG_SECRET=${searx_secret}
-SEARXNG_CATEGORIES=general,images,videos,news,map
-NUQ_POSTGRES_IMAGE=${nuq_postgres_image}
-NUQ_POSTGRES_PLATFORM=linux/amd64
-OPENAI_BASE_URL=${base_url}
-OPENAI_API_KEY=${qwen_key}
-MODEL_NAME=${model_name}
-# Optional vars kept explicit to avoid noisy compose warnings on fresh VPS
-MODEL_EMBEDDING_NAME=
-OLLAMA_BASE_URL=
-AUTUMN_SECRET_KEY=
-SLACK_WEBHOOK_URL=
-TEST_API_KEY=
-SUPABASE_ANON_TOKEN=
-SUPABASE_URL=
-SUPABASE_SERVICE_TOKEN=
-SELF_HOSTED_WEBHOOK_URL=
-LOGGING_LEVEL=
-SEARXNG_ENGINES=
-PROXY_SERVER=
-PROXY_USERNAME=
-PROXY_PASSWORD=
-ALLOW_LOCAL_WEBHOOKS=
-BLOCK_MEDIA=
 EOF
 
-  if [[ ! -f "${FIRECRAWL_DIR}/docker-compose.yaml" ]]; then
-    echo "Firecrawl docker-compose.yaml is missing after clone." >&2
-    return 1
-  fi
-
-  echo "Starting Firecrawl stack..."
-  cat > "${FIRECRAWL_DIR}/docker-compose.runtime.yaml" <<'EOF'
+  cat > "${SEARXNG_DIR}/docker-compose.yaml" <<'EOF'
 services:
-  playwright-service:
-    image: ghcr.io/firecrawl/playwright-service:latest
-    restart: unless-stopped
-    environment:
-      PORT: 3000
-      MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
-    networks:
-      - backend
-
-  api:
-    image: ghcr.io/firecrawl/firecrawl:latest
-    restart: unless-stopped
-    environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      REDIS_RATE_LIMIT_URL: ${REDIS_URL:-redis://redis:6379}
-      PLAYWRIGHT_MICROSERVICE_URL: ${PLAYWRIGHT_MICROSERVICE_URL:-http://playwright-service:3000/scrape}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
-      POSTGRES_HOST: ${POSTGRES_HOST:-nuq-postgres}
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
-      USE_DB_AUTHENTICATION: ${USE_DB_AUTHENTICATION:-false}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
-      MODEL_NAME: ${MODEL_NAME}
-      BULL_AUTH_KEY: ${BULL_AUTH_KEY}
-      SEARXNG_ENDPOINT: ${SEARXNG_ENDPOINT}
-      SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES}
-      HOST: 0.0.0.0
-      PORT: ${INTERNAL_PORT:-3002}
-      EXTRACT_WORKER_PORT: ${EXTRACT_WORKER_PORT:-3004}
-      WORKER_PORT: ${WORKER_PORT:-3005}
-      NUQ_RABBITMQ_URL: amqp://rabbitmq:5672
-      ENV: local
-    depends_on:
-      - redis
-      - playwright-service
-      - searxng
-      - rabbitmq
-      - nuq-postgres
-    ports:
-      - "${PORT:-3002}:${INTERNAL_PORT:-3002}"
-    command: node dist/src/harness.js --start-docker
-    networks:
-      - backend
-
   searxng:
     image: searxng/searxng:latest
     restart: unless-stopped
     environment:
-      BASE_URL: ${SEARXNG_PUBLIC_BASE_URL:-http://searxng:8080/}
-      INSTANCE_NAME: ${SEARXNG_INSTANCE_NAME:-firecrawl-searxng}
+      BASE_URL: ${SEARXNG_PUBLIC_BASE_URL:-http://127.0.0.1:18080/}
+      INSTANCE_NAME: ${SEARXNG_INSTANCE_NAME:-whox-searxng}
       SEARXNG_SECRET: ${SEARXNG_SECRET}
-    volumes:
-      - searxng-config:/etc/searxng
-      - ./searxng/settings.yml:/etc/searxng/settings.yml
-      - searxng-cache:/var/cache/searxng
     ports:
       - "${SEARXNG_PORT:-18080}:8080"
-    networks:
-      - backend
-
-  redis:
-    image: redis:alpine
-    restart: unless-stopped
-    command: redis-server --bind 0.0.0.0
-    networks:
-      - backend
-
-  rabbitmq:
-    image: rabbitmq:3-management
-    restart: unless-stopped
-    networks:
-      - backend
-
-  nuq-postgres:
-    image: ${NUQ_POSTGRES_IMAGE:-ghcr.io/firecrawl/nuq-postgres:latest}
-    platform: ${NUQ_POSTGRES_PLATFORM:-linux/amd64}
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
-    networks:
-      - backend
-
-networks:
-  backend:
-    driver: bridge
-
-volumes:
-  searxng-config:
-  searxng-cache:
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
 EOF
 
-  local compose_file="docker-compose.runtime.yaml"
   (
-    cd "$FIRECRAWL_DIR"
-    local -a compose_run
-    compose_run=("${compose_cmd[@]}" --ansi never)
-    local -a run_up_cmd
-    # Ensure we start from a clean state so stale failed containers/volumes
-    # from previous attempts don't poison health checks.
-    "${compose_run[@]}" -f "$compose_file" down -v --remove-orphans >/dev/null 2>&1 || true
-    if [[ "$use_legacy_compose" -eq 1 ]]; then
-      echo "Using legacy docker-compose compatibility mode"
-      run_up_cmd=("${compose_run[@]}" -f "$compose_file" up -d --no-build)
-    else
-      run_up_cmd=("${compose_run[@]}" -f "$compose_file" up -d --no-build)
-    fi
-
-    echo "Pulling Firecrawl images (this can take a few minutes on first install)..."
-    local -a firecrawl_images=(
-      "ghcr.io/firecrawl/playwright-service:latest"
-      "ghcr.io/firecrawl/firecrawl:latest"
-      "${nuq_postgres_image}"
-      "searxng/searxng:latest"
-      "redis:alpine"
-      "rabbitmq:3-management"
-    )
-    local img
-    for img in "${firecrawl_images[@]}"; do
-      echo "  pulling ${img}"
-      if command -v timeout >/dev/null 2>&1; then
-        timeout 900 docker pull "${img}"
-      else
-        docker pull "${img}"
-      fi
-    done
-
-    echo "Starting Firecrawl containers..."
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 600 "${run_up_cmd[@]}"
-    else
-      "${run_up_cmd[@]}"
-    fi
+    cd "$SEARXNG_DIR"
+    "${compose_cmd[@]}" -f docker-compose.yaml down -v --remove-orphans >/dev/null 2>&1 || true
+    echo "Pulling SearXNG image..."
+    docker pull searxng/searxng:latest >/dev/null
+    echo "Starting SearXNG container..."
+    "${compose_cmd[@]}" -f docker-compose.yaml up -d --no-build
   )
 
-  echo "Waiting for Firecrawl health (timeout: ${health_timeout}s)..."
+  echo "Waiting for SearXNG health (timeout: ${health_timeout}s)..."
   local elapsed=0
   local tick=2
-  local code_v1 code_health code_root api_state searx_state
-  local restart_attempted=0
-  local searx_restart_attempts=0
+  local code_root code_search searx_state
   while [[ "$elapsed" -lt "$health_timeout" ]]; do
-    code_v1="$(firecrawl_http_code "/v1/health")"
-    code_health="$(firecrawl_http_code "/health")"
-    code_root="$(firecrawl_http_code "/")"
-    api_state="$(firecrawl_service_state "$compose_file" "api" || echo unknown)"
-    searx_state="$(firecrawl_service_state "$compose_file" "searxng" || echo unknown)"
+    code_root="$(searxng_http_code "/")"
+    code_search="$(searxng_http_code "/search?q=whox&format=json&categories=general")"
+    searx_state="$(searxng_service_state "docker-compose.yaml" "searxng" || echo unknown)"
 
-    # If searxng exits during bootstrap, self-heal by restarting searxng + api.
-    if [[ "$searx_state" == "exited" && "$searx_restart_attempts" -lt 3 ]]; then
-      searx_restart_attempts=$((searx_restart_attempts + 1))
-      echo "  searxng container exited; attempting recovery (${searx_restart_attempts}/3)..."
-      (
-        cd "$FIRECRAWL_DIR"
-        "${compose_cmd[@]}" -f "$compose_file" logs --tail=25 searxng 2>/dev/null || true
-      )
-      if [[ "$searx_restart_attempts" -eq 2 ]]; then
-        echo "  restoring bundled SearXNG snapshot and recreating containers..."
-        restore_bundled_searxng_settings || {
-          echo "  bundled snapshot unavailable; applying minimal SearXNG settings..."
-          write_minimal_searxng_settings
-        }
-      elif [[ "$searx_restart_attempts" -eq 3 ]]; then
-        echo "  applying minimal SearXNG settings and recreating containers..."
-        write_minimal_searxng_settings
-      fi
-      (
-        cd "$FIRECRAWL_DIR"
-        if [[ "$searx_restart_attempts" -ge 2 ]]; then
-          "${compose_cmd[@]}" -f "$compose_file" up -d --force-recreate --no-build searxng api >/dev/null 2>&1 || true
-        else
-          "${compose_cmd[@]}" -f "$compose_file" restart searxng api >/dev/null 2>&1 || true
-        fi
-      )
-      sleep 3
-      continue
-    fi
-
-    if [[ ("$code_v1" == "200" || "$code_health" == "200") && "$api_state" == "running" && "$searx_state" == "running" ]]; then
-      echo "✓ Firecrawl healthy at http://127.0.0.1:3002"
+    if [[ "$searx_state" == "running" && "$code_search" == "200" ]]; then
+      echo "✓ SearXNG ready at http://127.0.0.1:${searx_host_port}"
       return 0
-    fi
-    # Some Firecrawl builds don't expose /v1/health consistently; if root responds
-    # with any normal HTTP status, the API is reachable and ready for WHOX.
-    case "$code_root" in
-      200|301|302|400|401|403|404|405)
-        if [[ "$api_state" != "running" || "$searx_state" != "running" ]]; then
-          # Reachable but degraded; don't accept success yet.
-          :
-        else
-        echo "✓ Firecrawl reachable at http://127.0.0.1:3002 (root HTTP ${code_root})"
-        return 0
-        fi
-        ;;
-    esac
-
-    # Self-heal once if API looks wedged (all localhost probes still 000 after 2 minutes).
-    if [[ "$restart_attempted" -eq 0 && "$elapsed" -ge 120 && "$code_v1" == "000" && "$code_health" == "000" && "$code_root" == "000" ]]; then
-      echo "  Firecrawl API still unreachable after ${elapsed}s; attempting one API container restart..."
-      (
-        cd "$FIRECRAWL_DIR"
-        "${compose_cmd[@]}" -f "$compose_file" restart api >/dev/null 2>&1 || true
-      )
-      restart_attempted=1
     fi
 
     if (( elapsed % 10 == 0 )); then
-      echo "  still waiting... ${elapsed}s elapsed (v1=${code_v1}, health=${code_health}, root=${code_root}, api=${api_state}, searxng=${searx_state})"
+      echo "  still waiting... ${elapsed}s elapsed (root=${code_root}, search=${code_search}, searxng=${searx_state})"
     fi
     sleep "$tick"
     elapsed=$((elapsed + tick))
   done
 
-  echo "Firecrawl did not become healthy in time." >&2
-  echo "Container status:" >&2
+  echo "SearXNG did not become healthy in time." >&2
   (
-    cd "$FIRECRAWL_DIR"
-    "${compose_cmd[@]}" -f "$compose_file" ps >&2 || true
+    cd "$SEARXNG_DIR"
+    "${compose_cmd[@]}" -f docker-compose.yaml ps >&2 || true
     echo "" >&2
-    echo "Last logs (api):" >&2
-    "${compose_cmd[@]}" -f "$compose_file" logs --tail=80 api >&2 || true
-    echo "" >&2
-    echo "Last logs (searxng):" >&2
-    "${compose_cmd[@]}" -f "$compose_file" logs --tail=80 searxng >&2 || true
+    "${compose_cmd[@]}" -f docker-compose.yaml logs --tail=80 searxng >&2 || true
   )
   return 1
 }
@@ -793,32 +420,15 @@ verify_installation_ready() {
     return 1
   fi
 
-  local code_v1 code_root
-  code_v1="$(firecrawl_http_code "/v1/health")"
-  local code_health
-  code_health="$(firecrawl_http_code "/health")"
-  code_root="$(firecrawl_http_code "/")"
-  local api_state searx_state
-  api_state="$(firecrawl_service_state "docker-compose.runtime.yaml" "api" || echo unknown)"
-  searx_state="$(firecrawl_service_state "docker-compose.runtime.yaml" "searxng" || echo unknown)"
-  if [[ ("$code_v1" == "200" || "$code_health" == "200") && "$api_state" == "running" && "$searx_state" == "running" ]]; then
-    echo "✓ Firecrawl API healthy"
-  else
-    case "$code_root" in
-      200|301|302|400|401|403|404|405)
-        if [[ "$api_state" == "running" && "$searx_state" == "running" ]]; then
-          echo "✓ Firecrawl API reachable (root HTTP ${code_root})"
-        else
-          echo "Firecrawl reachable but degraded (root=${code_root}, api=${api_state}, searxng=${searx_state})." >&2
-          return 1
-        fi
-        ;;
-      *)
-        echo "Firecrawl health check failed during final verification (v1=${code_v1}, health=${code_health}, root=${code_root}, api=${api_state}, searxng=${searx_state})." >&2
-        return 1
-        ;;
-    esac
+  local code_root code_search searx_state
+  code_root="$(searxng_http_code "/")"
+  code_search="$(searxng_http_code "/search?q=whox&format=json&categories=general")"
+  searx_state="$(searxng_service_state "docker-compose.yaml" "searxng" || echo unknown)"
+  if [[ "$searx_state" != "running" || "$code_search" != "200" ]]; then
+    echo "SearXNG health check failed during final verification (root=${code_root}, search=${code_search}, searxng=${searx_state})." >&2
+    return 1
   fi
+  echo "✓ SearXNG backend healthy"
 
   if [[ "$scope" == "system" ]]; then
     if [[ "$(id -u)" -eq 0 ]]; then
@@ -999,9 +609,9 @@ apply_snapshot_templates() {
   if [[ -f "${SNAPSHOT_RUNTIME_DIR}/config.template.yaml" ]]; then
     cp "${SNAPSHOT_RUNTIME_DIR}/config.template.yaml" "${WHOX_HOME}/config.snapshot.template.yaml"
   fi
-  if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-    mkdir -p "${FIRECRAWL_DIR}/searxng"
-    cp "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" "${FIRECRAWL_DIR}/searxng/settings.yml"
+  if [[ -f "${SNAPSHOT_SEARXNG_DIR}/settings.yml" ]]; then
+    mkdir -p "${SEARXNG_DIR}"
+    cp "${SNAPSHOT_SEARXNG_DIR}/settings.yml" "${SEARXNG_DIR}/settings.yml"
   fi
 }
 
@@ -1028,7 +638,7 @@ resolve_setup_dir() {
       SNAPSHOT_DIR="${SETUP_DIR}/snapshot"
     fi
     SNAPSHOT_RUNTIME_DIR="${SNAPSHOT_DIR}/runtime"
-    SNAPSHOT_FIRECRAWL_DIR="${SNAPSHOT_DIR}/firecrawl"
+    SNAPSHOT_SEARXNG_DIR="${SNAPSHOT_DIR}/searxng"
   }
 
   # Normal path: running from a cloned repo.
@@ -1141,8 +751,8 @@ WHOX_NONINTERACTIVE=1 "$SETUP_DIR/setup-whox.sh"
 apply_snapshot_templates
 
 echo ""
-if ! ensure_firecrawl_stack "$QWEN_KEY" "$DEFAULT_BASE_URL" "$DEFAULT_MODEL"; then
-  echo "Installer cannot continue because Firecrawl is not healthy." >&2
+if ! ensure_searxng_stack; then
+  echo "Installer cannot continue because SearXNG is not healthy." >&2
   exit 1
 fi
 
@@ -1178,11 +788,9 @@ upsert_env "$ENV_FILE" "WHOX_API_MAX_RETRIES" "0"
 upsert_env "$ENV_FILE" "WHOX_STREAM_RETRIES" "0"
 upsert_env "$ENV_FILE" "WHOX_AGENT_TIMEOUT" "0"
 upsert_env "$ENV_FILE" "WHOX_MAX_ITERATIONS" "0"
-upsert_env "$ENV_FILE" "FIRECRAWL_API_URL" "http://127.0.0.1:3002"
 upsert_env "$ENV_FILE" "SEARXNG_API_URL" "$SEARXNG_LOCAL_URL"
 upsert_env "$ENV_FILE" "WHOX_USE_DIRECT_SEARXNG_SEARCH" "1"
 upsert_env "$ENV_FILE" "WHOX_SEARXNG_SEARCH_TIMEOUT_SECONDS" "4"
-upsert_env "$ENV_FILE" "WHOX_FIRECRAWL_SEARCH_TIMEOUT_SECONDS" "20"
 upsert_env "$ENV_FILE" "WHOX_IMAGE_VALIDATE_TIMEOUT_SECONDS" "2.5"
 upsert_env "$ENV_FILE" "TELEGRAM_REPLY_TO_MODE" "off"
 upsert_env "$ENV_FILE" "WHOX_HIDE_RATE_LIMIT_STATUS" "1"
@@ -1229,11 +837,9 @@ upsert_env "$REPO_ENV_FILE" "WHOX_API_MAX_RETRIES" "0"
 upsert_env "$REPO_ENV_FILE" "WHOX_STREAM_RETRIES" "0"
 upsert_env "$REPO_ENV_FILE" "WHOX_AGENT_TIMEOUT" "0"
 upsert_env "$REPO_ENV_FILE" "WHOX_MAX_ITERATIONS" "0"
-upsert_env "$REPO_ENV_FILE" "FIRECRAWL_API_URL" "http://127.0.0.1:3002"
 upsert_env "$REPO_ENV_FILE" "SEARXNG_API_URL" "$SEARXNG_LOCAL_URL"
 upsert_env "$REPO_ENV_FILE" "WHOX_USE_DIRECT_SEARXNG_SEARCH" "1"
 upsert_env "$REPO_ENV_FILE" "WHOX_SEARXNG_SEARCH_TIMEOUT_SECONDS" "4"
-upsert_env "$REPO_ENV_FILE" "WHOX_FIRECRAWL_SEARCH_TIMEOUT_SECONDS" "20"
 upsert_env "$REPO_ENV_FILE" "WHOX_IMAGE_VALIDATE_TIMEOUT_SECONDS" "2.5"
 upsert_env "$REPO_ENV_FILE" "TELEGRAM_REPLY_TO_MODE" "off"
 upsert_env "$REPO_ENV_FILE" "WHOX_HIDE_RATE_LIMIT_STATUS" "1"
@@ -1331,7 +937,7 @@ terminal = cfg.setdefault("terminal", {})
 terminal["timeout"] = 180
 
 web_cfg = cfg.setdefault("web", {})
-web_cfg["backend"] = "firecrawl"
+web_cfg["backend"] = "searxng"
 
 display = cfg.setdefault("display", {})
 display["compact"] = False

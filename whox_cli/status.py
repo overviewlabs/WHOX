@@ -121,8 +121,7 @@ def show_status(args):
         "Kimi": "KIMI_API_KEY",
         "MiniMax": "MINIMAX_API_KEY",
         "MiniMax-CN": "MINIMAX_CN_API_KEY",
-        "Firecrawl": "FIRECRAWL_API_KEY",
-        "Tavily": "TAVILY_API_KEY",
+        "SearXNG URL": "SEARXNG_API_URL",
         "Browserbase": "BROWSERBASE_API_KEY",  # Optional — local browser works without this
         "FAL": "FAL_KEY",
         "Tinker": "TINKER_API_KEY",

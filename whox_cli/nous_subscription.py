@@ -245,10 +245,7 @@ def get_nous_subscription_features(
         terminal_cfg.get("modal_mode")
     )
 
-    direct_exa = bool(get_env_value("EXA_API_KEY"))
-    direct_firecrawl = bool(get_env_value("FIRECRAWL_API_KEY") or get_env_value("FIRECRAWL_API_URL"))
-    direct_parallel = bool(get_env_value("PARALLEL_API_KEY"))
-    direct_tavily = bool(get_env_value("TAVILY_API_KEY"))
+    direct_searxng = bool(get_env_value("SEARXNG_API_URL"))
     direct_fal = bool(get_env_value("FAL_KEY"))
     direct_openai_tts = bool(resolve_openai_audio_api_key())
     direct_elevenlabs = bool(get_env_value("ELEVENLABS_API_KEY"))
@@ -257,7 +254,7 @@ def get_nous_subscription_features(
     direct_browser_use = bool(get_env_value("BROWSER_USE_API_KEY"))
     direct_modal = has_direct_modal_credentials()
 
-    managed_web_available = managed_tools_flag and nous_auth_present and is_managed_tool_gateway_ready("firecrawl")
+    managed_web_available = False
     managed_image_available = managed_tools_flag and nous_auth_present and is_managed_tool_gateway_ready("fal-queue")
     managed_tts_available = managed_tools_flag and nous_auth_present and is_managed_tool_gateway_ready("openai-audio")
     managed_browser_available = managed_tools_flag and nous_auth_present and is_managed_tool_gateway_ready("browserbase")
@@ -268,19 +265,15 @@ def get_nous_subscription_features(
         managed_ready=managed_modal_available,
     )
 
-    web_managed = web_backend == "firecrawl" and managed_web_available and not direct_firecrawl
+    web_managed = False
     web_active = bool(
         web_tool_enabled
         and (
-            web_managed
-            or (web_backend == "exa" and direct_exa)
-            or (web_backend == "firecrawl" and direct_firecrawl)
-            or (web_backend == "parallel" and direct_parallel)
-            or (web_backend == "tavily" and direct_tavily)
+            (web_backend == "searxng" and direct_searxng)
         )
     )
     web_available = bool(
-        managed_web_available or direct_exa or direct_firecrawl or direct_parallel or direct_tavily
+        direct_searxng
     )
 
     image_managed = image_tool_enabled and managed_image_available and not direct_fal
@@ -489,12 +482,9 @@ def apply_nous_managed_defaults(
         config["browser"] = browser_cfg
 
     if "web" in selected_toolsets and not features.web.explicit_configured and not (
-        get_env_value("PARALLEL_API_KEY")
-        or get_env_value("TAVILY_API_KEY")
-        or get_env_value("FIRECRAWL_API_KEY")
-        or get_env_value("FIRECRAWL_API_URL")
+        get_env_value("SEARXNG_API_URL")
     ):
-        web_cfg["backend"] = "firecrawl"
+        web_cfg["backend"] = "searxng"
         changed.add("web")
 
     if "tts" in selected_toolsets and not features.tts.explicit_configured and not (
