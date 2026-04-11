@@ -78,6 +78,14 @@ prompt_yes_no() {
   done
 }
 
+prompt_optional() {
+  local label="$1"
+  local value=""
+  read -r -p "$label: " value
+  value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  printf "%s" "$value"
+}
+
 full_wipe_existing_install() {
   echo -e "${YELLOW}Existing WHOX install detected. Performing full wipe before reinstall...${NC}"
 
@@ -433,6 +441,47 @@ EOF
   return 1
 }
 
+ensure_caddy() {
+  local base_domain="$1"
+  if [[ -z "$base_domain" ]]; then
+    return 0
+  fi
+  echo -e "${CYAN}Configuring Caddy for app publishing...${NC}"
+
+  if ! command -v caddy >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+      apt-get update -y >/dev/null
+      apt-get install -y caddy >/dev/null
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -y >/dev/null
+      sudo apt-get install -y caddy >/dev/null
+    else
+      echo "Caddy is required for publishing but could not be installed automatically." >&2
+      return 1
+    fi
+  fi
+
+  if [[ ! -f /etc/caddy/Caddyfile ]]; then
+    local base_root
+    base_root="$(echo "$base_domain" | sed 's#^https\\?://##;s#^\\*\\.##;s#/$##')"
+    cat <<EOF | sudo tee /etc/caddy/Caddyfile >/dev/null
+{
+  email you@${base_root}
+}
+
+# Managed by WHOX installer
+import /etc/caddy/whox-apps.caddy
+EOF
+  fi
+
+  sudo mkdir -p /etc/caddy
+  sudo touch /etc/caddy/whox-apps.caddy
+  sudo systemctl enable --now caddy >/dev/null 2>&1 || true
+  sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+  sudo systemctl reload caddy >/dev/null 2>&1 || true
+  echo "✓ Caddy ready"
+}
+
 verify_installation_ready() {
   local whox_bin="$1"
   local scope="$2"
@@ -735,7 +784,11 @@ done
 echo "✓ Step 3 complete"
 echo ""
 
-VPS_DOMAIN_INPUT="$DEFAULT_DOMAIN"
+VPS_DOMAIN_INPUT="$(prompt_optional "4/4 Base publishing domain (optional, example: whox.ai)")"
+VPS_DOMAIN_INPUT="$(echo "$VPS_DOMAIN_INPUT" | tr '[:upper:]' '[:lower:]')"
+echo "✓ Step 4 complete"
+echo ""
+
 TZ_INPUT="$DEFAULT_TZ"
 
 echo -e "${CYAN}Validating Telegram bot token...${NC}"
@@ -776,6 +829,11 @@ apply_snapshot_templates
 echo ""
 if ! ensure_searxng_stack; then
   echo "Installer cannot continue because SearXNG is not healthy." >&2
+  exit 1
+fi
+
+if ! ensure_caddy "$VPS_DOMAIN_INPUT"; then
+  echo "Installer cannot continue because Caddy could not be configured." >&2
   exit 1
 fi
 
