@@ -32,7 +32,7 @@ Usage:
 
 Built by: github.com/jackx707
 Inspired by: GroceryMind — production WHOX agent doing live web research
-             across German grocery stores (firecrawl + whox-agent)
+             across German grocery stores (web tools + whox-agent)
 """
 
 from __future__ import annotations
@@ -381,7 +381,7 @@ class WebResearchEnv(WHOXAgentBaseEnv):
         )
 
         # ---- Signal 2: Web tool usage --------------------------------
-        web_tools = {"web_search", "web_extract", "search", "firecrawl"}
+        web_tools = {"web_search", "web_extract", "search"}
         tool_used = 1.0 if any(t in web_tools for t in tools_used) else 0.0
 
         # ---- Signal 3: Efficiency ------------------------------------

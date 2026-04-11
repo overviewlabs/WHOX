@@ -636,7 +636,7 @@ def _print_setup_summary(config: dict, whox_home):
     else:
         tool_status.append(("Mixture of Agents", False, "OPENROUTER_API_KEY"))
 
-    # Web tools (Exa, Parallel, Firecrawl, or Tavily)
+    # Web tools (SearXNG)
     if subscription_features.web.managed_by_nous:
         tool_status.append(("Web Search & Extract (Nous subscription)", True, None))
     elif subscription_features.web.available:
@@ -645,7 +645,7 @@ def _print_setup_summary(config: dict, whox_home):
             label = f"Web Search & Extract ({subscription_features.web.current_provider})"
         tool_status.append((label, True, None))
     else:
-        tool_status.append(("Web Search & Extract", False, "EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_URL, or TAVILY_API_KEY"))
+        tool_status.append(("Web Search & Extract", False, "SEARXNG_API_URL"))
 
     # Browser tools (local Chromium, Camofox, Browserbase, or Browser Use)
     browser_provider = subscription_features.browser.current_provider
@@ -2506,8 +2506,8 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
             tools.append("TTS/ElevenLabs")
         if get_env_value("BROWSERBASE_API_KEY"):
             tools.append("Browser")
-        if get_env_value("FIRECRAWL_API_KEY"):
-            tools.append("Firecrawl")
+        if get_env_value("SEARXNG_API_URL"):
+            tools.append("SearXNG")
         if tools:
             return ", ".join(tools)
         return None

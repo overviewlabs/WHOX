@@ -541,11 +541,11 @@ DEFAULT_CONFIG = {
 # Track which env vars were introduced in each config version.
 # Migration only mentions vars new since the user's previous version.
 ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
-    3: ["FIRECRAWL_API_KEY", "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID", "FAL_KEY"],
+    3: ["SEARXNG_API_URL", "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID", "FAL_KEY"],
     4: ["VOICE_TOOLS_OPENAI_KEY", "ELEVENLABS_API_KEY"],
     5: ["WHATSAPP_ENABLED", "WHATSAPP_MODE", "WHATSAPP_ALLOWED_USERS",
         "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS"],
-    10: ["TAVILY_API_KEY"],
+    10: [],
     11: ["TERMINAL_MODAL_MODE"],
 }
 
@@ -733,48 +733,16 @@ OPTIONAL_ENV_VARS = {
     },
 
     # ── Tool API keys ──
-    "EXA_API_KEY": {
-        "description": "Exa API key for AI-native web search and contents",
-        "prompt": "Exa API key",
-        "url": "https://exa.ai/",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "PARALLEL_API_KEY": {
-        "description": "Parallel API key for AI-native web search and extract",
-        "prompt": "Parallel API key",
-        "url": "https://parallel.ai/",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "FIRECRAWL_API_KEY": {
-        "description": "Firecrawl API key for web search and scraping",
-        "prompt": "Firecrawl API key",
-        "url": "https://firecrawl.dev/",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "FIRECRAWL_API_URL": {
-        "description": "Firecrawl API URL for self-hosted instances (optional)",
-        "prompt": "Firecrawl API URL (leave empty for cloud)",
+    "SEARXNG_API_URL": {
+        "description": "SearXNG URL for web search and extraction routing",
+        "prompt": "SearXNG URL (example: http://127.0.0.1:18080)",
         "url": None,
+        "tools": ["web_search", "web_extract"],
         "password": False,
         "category": "tool",
-        "advanced": True,
-    },
-    "FIRECRAWL_GATEWAY_URL": {
-        "description": "Exact Firecrawl tool-gateway origin override for Nous Subscribers only (optional)",
-        "prompt": "Firecrawl gateway URL (leave empty to derive from domain)",
-        "url": None,
-        "password": False,
-        "category": "tool",
-        "advanced": True,
     },
     "TOOL_GATEWAY_DOMAIN": {
-        "description": "Shared tool-gateway domain suffix for Nous Subscribers only, used to derive vendor hosts, e.g. nousresearch.com -> firecrawl-gateway.nousresearch.com",
+        "description": "Shared tool-gateway domain suffix for Nous Subscribers only, used to derive vendor hosts",
         "prompt": "Tool-gateway domain suffix",
         "url": None,
         "password": False,
@@ -796,14 +764,6 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "tool",
         "advanced": True,
-    },
-    "TAVILY_API_KEY": {
-        "description": "Tavily API key for AI-native web search, extract, and crawl",
-        "prompt": "Tavily API key",
-        "url": "https://app.tavily.com/home",
-        "tools": ["web_search", "web_extract", "web_crawl"],
-        "password": True,
-        "category": "tool",
     },
     "BROWSERBASE_API_KEY": {
         "description": "Browserbase API key for cloud browser (optional — local browser works without this)",
@@ -1152,7 +1112,6 @@ OPTIONAL_ENV_VARS = {
 
 if not _managed_nous_tools_enabled():
     for _hidden_var in (
-        "FIRECRAWL_GATEWAY_URL",
         "TOOL_GATEWAY_DOMAIN",
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
@@ -1914,10 +1873,7 @@ def show_config():
     keys = [
         ("OPENROUTER_API_KEY", "OpenRouter"),
         ("VOICE_TOOLS_OPENAI_KEY", "OpenAI (STT/TTS)"),
-        ("EXA_API_KEY", "Exa"),
-        ("PARALLEL_API_KEY", "Parallel"),
-        ("FIRECRAWL_API_KEY", "Firecrawl"),
-        ("TAVILY_API_KEY", "Tavily"),
+        ("SEARXNG_API_URL", "SearXNG URL"),
         ("BROWSERBASE_API_KEY", "Browserbase"),
         ("BROWSER_USE_API_KEY", "Browser Use"),
         ("FAL_KEY", "FAL"),
@@ -2074,9 +2030,8 @@ def set_config_value(key: str, value: str):
     # Check if it's an API key (goes to .env)
     api_keys = [
         'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_TOOLS_OPENAI_KEY',
-        'EXA_API_KEY', 'PARALLEL_API_KEY', 'FIRECRAWL_API_KEY', 'FIRECRAWL_API_URL',
-        'FIRECRAWL_GATEWAY_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
-        'TOOL_GATEWAY_USER_TOKEN', 'TAVILY_API_KEY',
+        'SEARXNG_API_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
+        'TOOL_GATEWAY_USER_TOKEN',
         'BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'BROWSER_USE_API_KEY',
         'FAL_KEY', 'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
         'TERMINAL_SSH_HOST', 'TERMINAL_SSH_USER', 'TERMINAL_SSH_KEY',

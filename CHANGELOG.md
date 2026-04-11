@@ -7,7 +7,7 @@
 - Added prerequisite bootstrap before major install stages.
 - Improved Firecrawl startup reliability and health-check diagnostics.
 - Added strict post-install readiness gates (CLI, gateway service, Firecrawl health).
-- Added sanitized runtime/firecrawl snapshot templates for reproducible functional setup.
+- Added sanitized runtime search snapshot templates for reproducible functional setup.
 
 ## v0.1.0 - 2026-04-08
 

@@ -82,7 +82,6 @@ def _build_provider_env_blocklist() -> frozenset:
         "FIREWORKS_API_KEY",       # Fireworks AI
         "XAI_API_KEY",             # xAI (Grok)
         "HELICONE_API_KEY",        # LLM Observability proxy
-        "PARALLEL_API_KEY",
         # Gateway/runtime config not represented in OPTIONAL_ENV_VARS.
         "TELEGRAM_HOME_CHANNEL",
         "TELEGRAM_HOME_CHANNEL_NAME",
