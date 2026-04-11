@@ -219,13 +219,13 @@ async def web_extract_tool(urls: List[str], format: str = None, use_llm_processi
             continue
         if not is_safe_url(url):
             continue
-        allowed, reason = check_website_access(url)
-        if not allowed:
+        blocked = check_website_access(url)
+        if blocked:
             documents.append(
                 {
                     "url": url,
                     "content": "",
-                    "error": reason or "blocked by policy",
+                    "error": blocked.get("message") or "blocked by policy",
                     "metadata": {"sourceURL": url},
                 }
             )
