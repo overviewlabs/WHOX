@@ -430,14 +430,31 @@ EOF
     fi
   fi
 
-  if [[ ! -d "${FIRECRAWL_DIR}/.git" ]]; then
-    echo "Cloning Firecrawl into ${FIRECRAWL_DIR}..."
-    mkdir -p "$(dirname "$FIRECRAWL_DIR")"
-    git clone --depth=1 "$FIRECRAWL_REPO_URL" "$FIRECRAWL_DIR" >/dev/null
-  else
+  if [[ -d "${FIRECRAWL_DIR}/.git" ]]; then
     echo "Updating Firecrawl repo..."
     git -C "$FIRECRAWL_DIR" fetch --depth=1 origin main >/dev/null 2>&1 || true
     git -C "$FIRECRAWL_DIR" reset --hard origin/main >/dev/null 2>&1 || true
+  else
+    # Recover automatically when a previous failed install left a partial/non-git
+    # directory at FIRECRAWL_DIR (common on interrupted installs).
+    if [[ -d "$FIRECRAWL_DIR" ]]; then
+      if find "$FIRECRAWL_DIR" -mindepth 1 -maxdepth 1 -print -quit >/dev/null 2>&1; then
+        local backup_dir
+        backup_dir="${FIRECRAWL_DIR}.backup.$(date +%Y%m%d-%H%M%S)"
+        echo "Existing non-repo directory found at ${FIRECRAWL_DIR}; moving to ${backup_dir}..."
+        mv "$FIRECRAWL_DIR" "$backup_dir" 2>/dev/null || rm -rf "$FIRECRAWL_DIR"
+      else
+        rmdir "$FIRECRAWL_DIR" 2>/dev/null || true
+      fi
+    fi
+
+    echo "Cloning Firecrawl into ${FIRECRAWL_DIR}..."
+    mkdir -p "$(dirname "$FIRECRAWL_DIR")"
+    if ! git clone --depth=1 "$FIRECRAWL_REPO_URL" "$FIRECRAWL_DIR" >/dev/null; then
+      echo "Firecrawl clone failed. Retrying once with a clean target directory..."
+      rm -rf "$FIRECRAWL_DIR"
+      git clone --depth=1 "$FIRECRAWL_REPO_URL" "$FIRECRAWL_DIR" >/dev/null
+    fi
   fi
 
   # Use a deterministic, known-good SearXNG config by default to avoid schema drift
