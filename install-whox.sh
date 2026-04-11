@@ -300,6 +300,11 @@ general:
   instance_name: whox-searxng
 search:
   safe_search: 0
+  formats:
+    - html
+    - json
+    - csv
+    - rss
 server:
   limiter: false
   image_proxy: true
@@ -372,7 +377,7 @@ services:
     ports:
       - "${SEARXNG_PORT:-18080}:8080"
     volumes:
-      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - ./settings.yml:/etc/searxng/settings.yml
 EOF
 
   (
@@ -388,10 +393,23 @@ EOF
   local elapsed=0
   local tick=2
   local code_root code_search searx_state
+  local json_repair_attempted=0
   while [[ "$elapsed" -lt "$health_timeout" ]]; do
     code_root="$(searxng_http_code "/")"
     code_search="$(searxng_http_code "/search?q=whox&format=json&categories=general")"
     searx_state="$(searxng_service_state "docker-compose.yaml" "searxng" || echo unknown)"
+
+    if [[ "$searx_state" == "running" && "$code_search" == "403" && "$json_repair_attempted" -eq 0 ]]; then
+      json_repair_attempted=1
+      echo "  detected /search JSON 403, applying compatibility repair and restarting SearXNG..."
+      write_minimal_searxng_settings
+      (
+        cd "$SEARXNG_DIR"
+        "${compose_cmd[@]}" -f docker-compose.yaml up -d --force-recreate --no-build searxng >/dev/null 2>&1 || true
+      )
+      sleep 4
+      continue
+    fi
 
     if [[ "$searx_state" == "running" && "$code_search" == "200" ]]; then
       echo "✓ SearXNG ready at http://127.0.0.1:${searx_host_port}"
