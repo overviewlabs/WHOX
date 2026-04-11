@@ -156,19 +156,19 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
     try:
         normalized_category = _normalize_search_category(category)
         page = max(1, int(pageno or 1))
-        per_page = max(1, min(int(limit or 5), 20))
+        per_page = max(1, min(int(limit or 15), 20))
         response = _searxng_search(query=query, category=normalized_category, limit=per_page, pageno=page)
         web_results = (response.get("data") or {}).get("web") or []
 
         if normalized_category == "images":
             images = _shape_image_search_results(web_results, limit=per_page)
-            response_data = {
-                "success": True,
-                "category": "images",
-                "search_backend": "searxng",
-                "pageno": page,
-                "per_page": per_page,
-                "data": {
+        response_data = {
+            "success": True,
+            "category": "images",
+            "search_backend": "searxng",
+            "pageno": page,
+            "per_page": per_page,
+            "data": {
                     "image_src_only": True,
                     "images": images,
                     "web": [
@@ -182,7 +182,7 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
                     ],
                 },
             }
-            return json.dumps(response_data, indent=2, ensure_ascii=False)
+        return json.dumps(response_data, indent=2, ensure_ascii=False)
 
         page_web = _paginate_rows(web_results, per_page, page)
         response_data = {
@@ -281,7 +281,7 @@ def _web_requires_env() -> list[str]:
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web with SearXNG. Supported categories: general, images, videos, news. For category=images, returns image src links only.",
+    "description": "Search the web with SearXNG. Supported categories: general, images, videos, news. Returns 15 results per page by default. For category=images, returns image src links only.",
     "parameters": {
         "type": "object",
         "properties": {
