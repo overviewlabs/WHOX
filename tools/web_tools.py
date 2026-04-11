@@ -152,7 +152,7 @@ def _paginate_rows(rows: List[Dict[str, Any]], per_page: int, pageno: int) -> Li
     return rows[start:end]
 
 
-def web_search_tool(query: str, limit: int = 5, category: str = "general", pageno: int = 1) -> str:
+def web_search_tool(query: str, category: str = "general", pageno: int = 1) -> str:
     try:
         normalized_category = _normalize_search_category(category)
         page = max(1, int(pageno or 1))
@@ -282,7 +282,7 @@ def _web_requires_env() -> list[str]:
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web with SearXNG. Supported categories: general, images, videos, news. Returns 15 results per page by default. For category=images, returns image src links only.",
+    "description": "Search the web with SearXNG. Supported categories: general, images, videos, news. Returns 15 results per page. For category=images, returns image src links only.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -321,7 +321,6 @@ registry.register(
     schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(
         args.get("query", ""),
-        limit=5,
         category=args.get("category", "general"),
         pageno=args.get("pageno", 1),
     ),
