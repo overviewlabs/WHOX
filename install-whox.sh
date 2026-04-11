@@ -267,6 +267,9 @@ ensure_firecrawl_stack() {
   local base_url="$2"
   local model_name="$3"
   local health_timeout="${WHOX_FIRECRAWL_HEALTH_TIMEOUT:-600}"
+  local host_arch
+  host_arch="$(uname -m 2>/dev/null || echo unknown)"
+  local nuq_postgres_image="ghcr.io/firecrawl/nuq-postgres:latest"
 
   sanitize_searxng_settings() {
     local settings_file="$1"
@@ -316,6 +319,35 @@ server:
 EOF
   }
 
+  ensure_nuq_amd64_emulation() {
+    if [[ "$host_arch" != "aarch64" && "$host_arch" != "arm64" ]]; then
+      return 0
+    fi
+    # nuq-postgres is amd64-only at the moment; make sure ARM hosts can execute it.
+    if docker run --rm --platform linux/amd64 ghcr.io/firecrawl/nuq-postgres:latest true >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "ARM host detected; enabling amd64 emulation for nuq-postgres..."
+    if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+      apt-get update -y >/dev/null || true
+      apt-get install -y qemu-user-static binfmt-support >/dev/null || true
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -y >/dev/null || true
+      sudo apt-get install -y qemu-user-static binfmt-support >/dev/null || true
+    fi
+    if [[ "$(id -u)" -eq 0 ]]; then
+      docker run --privileged --rm tonistiigi/binfmt --install amd64 >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo docker run --privileged --rm tonistiigi/binfmt --install amd64 >/dev/null 2>&1 || true
+    fi
+    if ! docker run --rm --platform linux/amd64 ghcr.io/firecrawl/nuq-postgres:latest true >/dev/null 2>&1; then
+      echo "Failed to enable amd64 emulation for nuq-postgres on ARM host." >&2
+      echo "Install qemu-user-static + binfmt and ensure Docker can run linux/amd64 images." >&2
+      return 1
+    fi
+    return 0
+  }
+
   echo -e "${CYAN}Provisioning Firecrawl (self-hosted web backend)...${NC}"
 
   if ! command -v docker >/dev/null 2>&1; then
@@ -345,6 +377,12 @@ EOF
   if ! docker info >/dev/null 2>&1; then
     echo "Docker daemon is not running. Unable to start Firecrawl." >&2
     return 1
+  fi
+
+  if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
+    if ! ensure_nuq_amd64_emulation; then
+      return 1
+    fi
   fi
 
   # Prefer Compose v2 plugin (supports modern compose files with top-level `name:`).
@@ -402,16 +440,23 @@ EOF
     git -C "$FIRECRAWL_DIR" reset --hard origin/main >/dev/null 2>&1 || true
   fi
 
-  if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-    restore_bundled_searxng_settings || {
-      echo "Falling back to minimal compatible SearXNG settings..."
+  # Use a deterministic, known-good SearXNG config by default to avoid schema drift
+  # from upstream snapshots. Set WHOX_USE_SEARXNG_SNAPSHOT=1 to opt into snapshot.
+  if [[ "${WHOX_USE_SEARXNG_SNAPSHOT:-0}" == "1" ]]; then
+    if [[ -f "${SNAPSHOT_FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
+      restore_bundled_searxng_settings || {
+        echo "Falling back to minimal compatible SearXNG settings..."
+        write_minimal_searxng_settings
+      }
+    elif [[ ! -f "${FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
+      echo "Bundled SearXNG settings snapshot is missing; generating minimal compatible settings..."
       write_minimal_searxng_settings
-    }
-  elif [[ ! -f "${FIRECRAWL_DIR}/searxng/settings.yml" ]]; then
-    echo "Bundled SearXNG settings snapshot is missing; generating minimal compatible settings..."
-    write_minimal_searxng_settings
+    else
+      sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
+    fi
   else
-    sanitize_searxng_settings "${FIRECRAWL_DIR}/searxng/settings.yml"
+    echo "Using deterministic minimal SearXNG settings for stable startup..."
+    write_minimal_searxng_settings
   fi
 
   local searx_secret
@@ -425,6 +470,8 @@ BULL_AUTH_KEY=CHANGEME
 SEARXNG_ENDPOINT=http://searxng:8080
 SEARXNG_SECRET=${searx_secret}
 SEARXNG_CATEGORIES=general,images,videos,news,map
+NUQ_POSTGRES_IMAGE=${nuq_postgres_image}
+NUQ_POSTGRES_PLATFORM=linux/amd64
 OPENAI_BASE_URL=${base_url}
 OPENAI_API_KEY=${qwen_key}
 MODEL_NAME=${model_name}
@@ -457,6 +504,7 @@ EOF
 services:
   playwright-service:
     image: ghcr.io/firecrawl/playwright-service:latest
+    restart: unless-stopped
     environment:
       PORT: 3000
       MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
@@ -465,6 +513,7 @@ services:
 
   api:
     image: ghcr.io/firecrawl/firecrawl:latest
+    restart: unless-stopped
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       REDIS_RATE_LIMIT_URL: ${REDIS_URL:-redis://redis:6379}
@@ -501,6 +550,7 @@ services:
 
   searxng:
     image: searxng/searxng:latest
+    restart: unless-stopped
     environment:
       BASE_URL: ${SEARXNG_PUBLIC_BASE_URL:-http://searxng:8080/}
       INSTANCE_NAME: ${SEARXNG_INSTANCE_NAME:-firecrawl-searxng}
@@ -514,17 +564,21 @@ services:
 
   redis:
     image: redis:alpine
+    restart: unless-stopped
     command: redis-server --bind 0.0.0.0
     networks:
       - backend
 
   rabbitmq:
     image: rabbitmq:3-management
+    restart: unless-stopped
     networks:
       - backend
 
   nuq-postgres:
-    image: ghcr.io/firecrawl/nuq-postgres:latest
+    image: ${NUQ_POSTGRES_IMAGE:-ghcr.io/firecrawl/nuq-postgres:latest}
+    platform: ${NUQ_POSTGRES_PLATFORM:-linux/amd64}
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -547,6 +601,9 @@ EOF
     local -a compose_run
     compose_run=("${compose_cmd[@]}" --ansi never)
     local -a run_up_cmd
+    # Ensure we start from a clean state so stale failed containers/volumes
+    # from previous attempts don't poison health checks.
+    "${compose_run[@]}" -f "$compose_file" down -v --remove-orphans >/dev/null 2>&1 || true
     if [[ "$use_legacy_compose" -eq 1 ]]; then
       echo "Using legacy docker-compose compatibility mode"
       run_up_cmd=("${compose_run[@]}" -f "$compose_file" up -d --no-build)
@@ -558,7 +615,7 @@ EOF
     local -a firecrawl_images=(
       "ghcr.io/firecrawl/playwright-service:latest"
       "ghcr.io/firecrawl/firecrawl:latest"
-      "ghcr.io/firecrawl/nuq-postgres:latest"
+      "${nuq_postgres_image}"
       "searxng/searxng:latest"
       "redis:alpine"
       "rabbitmq:3-management"
