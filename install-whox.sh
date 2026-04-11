@@ -165,7 +165,10 @@ searxng_http_code() {
   local path="$1"
   local port="${WHOX_SEARXNG_HOST_PORT_RESOLVED:-18080}"
   local code=""
-  code="$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
+  code="$(curl -sS --max-time 3 \
+    -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) WHOX-Installer/1.0" \
+    -H "Accept: application/json,text/html,*/*" \
+    -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
   if [[ ! "$code" =~ ^[0-9]{3}$ ]]; then
     echo "000"
   else
