@@ -156,17 +156,18 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
     try:
         normalized_category = _normalize_search_category(category)
         page = max(1, int(pageno or 1))
-        per_page = max(1, min(int(limit or 15), 20))
+        # Enforce a fixed 15 results per page regardless of requested limit.
+        per_page = 15
         response = _searxng_search(query=query, category=normalized_category, limit=per_page, pageno=page)
         web_results = (response.get("data") or {}).get("web") or []
 
         if normalized_category == "images":
             images = _shape_image_search_results(web_results, limit=per_page)
-        response_data = {
-            "success": True,
-            "category": "images",
-            "search_backend": "searxng",
-            "pageno": page,
+            response_data = {
+                "success": True,
+                "category": "images",
+                "search_backend": "searxng",
+                "pageno": page,
             "per_page": per_page,
             "data": {
                     "image_src_only": True,
