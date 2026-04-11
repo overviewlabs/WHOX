@@ -482,6 +482,63 @@ EOF
   echo "✓ Caddy ready"
 }
 
+publish_smoke_test() {
+  local base_domain="$1"
+  if [[ -z "$base_domain" ]]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo -e "${CYAN}Running publish smoke test...${NC}"
+  local label="whox-installer-test"
+  local test_dir="${WHOX_HOME}/apps/${label}-$(date +%Y%m%d%H%M%S)"
+  local port
+  port="$(choose_available_port 49400)"
+  mkdir -p "$test_dir"
+  cat > "${test_dir}/index.html" <<EOF
+<!doctype html>
+<html><head><meta charset="utf-8"><title>WHOX Publish Test</title></head>
+<body><h1>WHOX publish test OK</h1></body></html>
+EOF
+
+  python3 -m http.server "$port" --bind 127.0.0.1 --directory "$test_dir" >/tmp/whox_publish_test.log 2>&1 &
+  local server_pid=$!
+
+  local include="/etc/caddy/whox-apps.caddy"
+  local marker_begin="# WHOX-INSTALLER-TEST-BEGIN"
+  local marker_end="# WHOX-INSTALLER-TEST-END"
+  {
+    echo "$marker_begin"
+    echo "${label}.${base_domain} {"
+    echo "  reverse_proxy 127.0.0.1:${port}"
+    echo "}"
+    echo "$marker_end"
+  } | sudo tee -a "$include" >/dev/null
+
+  sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+  sudo systemctl reload caddy >/dev/null 2>&1 || true
+
+  local status
+  status="$(curl -sS -o /dev/null -m 6 -w "%{http_code}" -H "Host: ${label}.${base_domain}" http://127.0.0.1/ 2>/dev/null || true)"
+  if [[ "$status" =~ ^(200|301|302|308)$ ]]; then
+    echo "✓ Publish smoke test passed (HTTP ${status})"
+  else
+    echo "⚠ Publish smoke test did not return expected HTTP status (got ${status})." >&2
+  fi
+
+  sudo awk -v b="$marker_begin" -v e="$marker_end" '
+    $0==b {skip=1; next}
+    $0==e {skip=0; next}
+    !skip {print}
+  ' "$include" > /tmp/whox_apps_tmp.caddy
+  sudo mv /tmp/whox_apps_tmp.caddy "$include"
+  sudo systemctl reload caddy >/dev/null 2>&1 || true
+  kill "$server_pid" >/dev/null 2>&1 || true
+  rm -rf "$test_dir" >/dev/null 2>&1 || true
+}
+
 verify_installation_ready() {
   local whox_bin="$1"
   local scope="$2"
@@ -836,6 +893,8 @@ if ! ensure_caddy "$VPS_DOMAIN_INPUT"; then
   echo "Installer cannot continue because Caddy could not be configured." >&2
   exit 1
 fi
+
+publish_smoke_test "$VPS_DOMAIN_INPUT"
 
 echo ""
 echo -e "${CYAN}Applying WHOX configuration...${NC}"
