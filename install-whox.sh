@@ -22,6 +22,7 @@ SNAPSHOT_FIRECRAWL_DIR="${SNAPSHOT_DIR}/firecrawl"
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 YELLOW='\033[0;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 banner() {
@@ -739,6 +740,86 @@ verify_installation_ready() {
   return 0
 }
 
+verify_telegram_runtime_ready() {
+  local whox_bin="$1"
+  local scope="$2"
+  local token="$3"
+  local expected_allowed_users="$4"
+
+  if [[ -z "$token" ]]; then
+    echo "Telegram runtime validation failed: TELEGRAM_BOT_TOKEN is empty." >&2
+    return 1
+  fi
+
+  # Ensure runtime env still contains the token we just installed.
+  local runtime_token=""
+  if [[ -f "$ENV_FILE" ]]; then
+    runtime_token="$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' "$ENV_FILE" | head -n1)"
+  fi
+  if [[ -z "$runtime_token" ]]; then
+    echo "Telegram runtime validation failed: TELEGRAM_BOT_TOKEN missing from ${ENV_FILE}." >&2
+    return 1
+  fi
+  if [[ "$runtime_token" != "$token" ]]; then
+    echo "Telegram runtime validation failed: token mismatch between installer input and runtime env." >&2
+    return 1
+  fi
+
+  # Validate token against Telegram API.
+  local getme_json=""
+  getme_json="$(curl -sS --max-time 20 "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || true)"
+  if ! echo "$getme_json" | grep -q '"ok":[[:space:]]*true'; then
+    echo "Telegram runtime validation failed: getMe check did not return ok=true." >&2
+    return 1
+  fi
+
+  # Force long-poll mode (clear webhook if present).
+  local webhook_json webhook_url
+  webhook_json="$(curl -sS --max-time 20 "https://api.telegram.org/bot${token}/getWebhookInfo" 2>/dev/null || true)"
+  webhook_url="$(echo "$webhook_json" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p' | head -n1)"
+  if [[ -n "$webhook_url" ]]; then
+    echo "Telegram webhook detected; clearing webhook to keep WHOX long-polling active..."
+    curl -sS --max-time 20 "https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=true" >/dev/null 2>&1 || true
+  fi
+
+  # Verify WHOX status reports Telegram configured.
+  local status_text=""
+  status_text="$("$whox_bin" status 2>/dev/null || true)"
+  if echo "$status_text" | grep -qE 'Telegram[[:space:]]+✗[[:space:]]+not configured'; then
+    echo "Telegram runtime validation failed: WHOX status still reports Telegram not configured." >&2
+    return 1
+  fi
+
+  # Fail fast on the exact startup warning that leads to silent Telegram bots.
+  local recent_logs=""
+  if [[ "$scope" == "system" ]]; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      recent_logs="$(journalctl -u whox-gateway -n 160 --no-pager -l 2>/dev/null || true)"
+    else
+      recent_logs="$(sudo journalctl -u whox-gateway -n 160 --no-pager -l 2>/dev/null || true)"
+    fi
+  else
+    recent_logs="$(journalctl --user -u whox-gateway -n 160 --no-pager -l 2>/dev/null || true)"
+  fi
+  if echo "$recent_logs" | grep -q "No messaging platforms enabled"; then
+    echo "Telegram runtime validation failed: gateway started with no messaging platforms enabled." >&2
+    return 1
+  fi
+
+  # Validate allowlist wiring when a specific user is provided.
+  if [[ -n "$expected_allowed_users" ]]; then
+    local env_allowlist=""
+    env_allowlist="$(sed -n 's/^TELEGRAM_ALLOWED_USERS=//p' "$ENV_FILE" | head -n1)"
+    if [[ "$env_allowlist" != "$expected_allowed_users" ]]; then
+      echo "Telegram runtime validation failed: TELEGRAM_ALLOWED_USERS mismatch in runtime env." >&2
+      return 1
+    fi
+  fi
+
+  echo "✓ Telegram runtime validated (token, polling mode, gateway wiring)"
+  return 0
+}
+
 ensure_system_gateway_running() {
   local whox_bin="$1"
   local setup_dir="$2"
@@ -1313,6 +1394,18 @@ if [[ -n "$WHOX_BIN" ]]; then
 
   echo ""
   send_telegram_boot_ping "$TG_BOT_TOKEN" "$TELEGRAM_ALLOWED_USERS"
+
+  if ! verify_telegram_runtime_ready "$WHOX_BIN" "$INSTALLED_SCOPE" "$TG_BOT_TOKEN" "$TELEGRAM_ALLOWED_USERS"; then
+    echo "Installer completed setup steps but Telegram runtime validation failed." >&2
+    echo "Run diagnostics:" >&2
+    echo "  $WHOX_BIN status" >&2
+    if [[ "$INSTALLED_SCOPE" == "system" ]]; then
+      echo "  journalctl -u whox-gateway -n 160 --no-pager -l" >&2
+    else
+      echo "  journalctl --user -u whox-gateway -n 160 --no-pager -l" >&2
+    fi
+    exit 1
+  fi
 
   if ! verify_installation_ready "$WHOX_BIN" "$INSTALLED_SCOPE"; then
     echo "Installer completed setup steps but final verification failed." >&2
