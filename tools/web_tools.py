@@ -69,6 +69,24 @@ logger = logging.getLogger(__name__)
 
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+        if value <= 0:
+            return default
+        return value
+    except Exception:
+        return default
+
+
+_FIRECRAWL_SEARCH_TIMEOUT_SECONDS = _env_float("WHOX_FIRECRAWL_SEARCH_TIMEOUT_SECONDS", 20.0)
+_SEARXNG_SEARCH_TIMEOUT_SECONDS = _env_float("WHOX_SEARXNG_SEARCH_TIMEOUT_SECONDS", 4.0)
+_IMAGE_VALIDATE_TIMEOUT_SECONDS = _env_float("WHOX_IMAGE_VALIDATE_TIMEOUT_SECONDS", 2.5)
+_DIRECT_SEARXNG_SEARCH_ENABLED = (os.getenv("WHOX_USE_DIRECT_SEARXNG_SEARCH", "1").strip().lower() not in {"0", "false", "no", "off"})
+
 def _has_env(name: str) -> bool:
     val = os.getenv(name)
     return bool(val and val.strip())
@@ -276,7 +294,7 @@ def _firecrawl_v1_search(query: str, limit: int, category: str = "general") -> d
     base_url, headers = _get_firecrawl_http_config()
     payload: Dict[str, Any] = {"query": query, "limit": limit}
 
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=_FIRECRAWL_SEARCH_TIMEOUT_SECONDS) as client:
         resp = client.post(
             f"{base_url}/v1/search",
             headers=headers,
@@ -297,7 +315,7 @@ def _firecrawl_v2_search(query: str, limit: int, category: str = "general", page
         "sources": [{"type": "web"}],
     }
 
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=_FIRECRAWL_SEARCH_TIMEOUT_SECONDS) as client:
         resp = client.post(
             f"{base_url}/v2/search",
             headers=headers,
@@ -332,7 +350,7 @@ def _searxng_search(query: str, category: str, limit: int, pageno: int = 1) -> D
         "pageno": max(1, int(pageno or 1)),
     }
 
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=_SEARXNG_SEARCH_TIMEOUT_SECONDS, follow_redirects=True) as client:
         resp = client.get(endpoint, params=params)
         resp.raise_for_status()
         payload = resp.json()
@@ -357,6 +375,20 @@ def _searxng_search(query: str, category: str, limit: int, pageno: int = 1) -> D
         )
 
     return {"success": True, "data": {"web": web_rows}, "backend": "searxng", "category": category}
+
+
+def _use_direct_searxng_search(category: str) -> bool:
+    """
+    Decide whether web_search should route to direct SearXNG for speed.
+
+    Map lookups continue to use Firecrawl v2, which supports that category
+    consistently through the Firecrawl API path.
+    """
+    if not _DIRECT_SEARXNG_SEARCH_ENABLED:
+        return False
+    if category == "map":
+        return False
+    return bool(_get_searxng_base_url())
 
 
 def _firecrawl_v1_scrape(url: str, formats: List[str]) -> dict:
@@ -651,8 +683,16 @@ def _is_actual_image_url(url: str) -> bool:
     if not _looks_like_image_url(url):
         # If it doesn't even resemble image URL, still allow HEAD probe once.
         pass
+    # Fast-path: extension/query heuristics are enough for most direct image src
+    # links and avoid per-result network round-trips.
+    if _looks_like_image_url(url):
+        return True
     try:
-        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        timeout_cfg = httpx.Timeout(
+            _IMAGE_VALIDATE_TIMEOUT_SECONDS,
+            connect=min(1.5, _IMAGE_VALIDATE_TIMEOUT_SECONDS),
+        )
+        with httpx.Client(timeout=timeout_cfg, follow_redirects=True) as client:
             response = client.head(url)
             ctype = (response.headers.get("content-type") or "").lower()
             if ctype.startswith("image/"):
@@ -1468,34 +1508,50 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
         used_v2 = False
         search_backend_detail = "firecrawl_v1"
         firecrawl_limit = fetch_limit
+        response = None
 
-        try:
-            response = _firecrawl_v2_search(
-                query=query,
-                limit=per_page,
-                category=normalized_category,
-                pageno=page,
-            )
-            used_v2 = True
-            search_backend_detail = "firecrawl_v2"
-            firecrawl_limit = per_page
-        except Exception as v2_error:
-            logger.warning("Firecrawl v2 search failed, falling back to v1/search: %s", v2_error)
-            if normalized_category == "map":
-                return json.dumps({
-                    "success": False,
-                    "error": "category='map' requires Firecrawl v2/search support. v2 request failed."
-                }, ensure_ascii=False)
+        # Fast path: direct SearXNG is typically much faster for metadata-only search.
+        if backend == "firecrawl" and _use_direct_searxng_search(normalized_category):
+            try:
+                response = _searxng_search(
+                    query=query,
+                    category=normalized_category,
+                    limit=per_page,
+                    pageno=page,
+                )
+                search_backend_detail = "searxng_direct"
+                firecrawl_limit = per_page
+            except Exception as searx_error:
+                logger.warning("Direct SearXNG search failed, falling back to Firecrawl: %s", searx_error)
 
-            category_query = query
-            if normalized_category == "images":
-                category_query = f"!images {query}"
-            elif normalized_category == "videos":
-                category_query = f"!videos {query}"
-            elif normalized_category == "news":
-                category_query = f"!news {query}"
+        if response is None:
+            try:
+                response = _firecrawl_v2_search(
+                    query=query,
+                    limit=per_page,
+                    category=normalized_category,
+                    pageno=page,
+                )
+                used_v2 = True
+                search_backend_detail = "firecrawl_v2"
+                firecrawl_limit = per_page
+            except Exception as v2_error:
+                logger.warning("Firecrawl v2 search failed, falling back to v1/search: %s", v2_error)
+                if normalized_category == "map":
+                    return json.dumps({
+                        "success": False,
+                        "error": "category='map' requires Firecrawl v2/search support. v2 request failed."
+                    }, ensure_ascii=False)
 
-            response = _firecrawl_v1_search(query=category_query, limit=fetch_limit)
+                category_query = query
+                if normalized_category == "images":
+                    category_query = f"!images {query}"
+                elif normalized_category == "videos":
+                    category_query = f"!videos {query}"
+                elif normalized_category == "news":
+                    category_query = f"!news {query}"
+
+                response = _firecrawl_v1_search(query=category_query, limit=fetch_limit)
 
         web_results = _extract_web_search_results(response)
         results_count = len(web_results)
@@ -1506,7 +1562,7 @@ def web_search_tool(query: str, limit: int = 5, category: str = "general", pagen
             images = _shape_image_search_results(web_results, limit=firecrawl_limit)
             # Firecrawl+SearXNG often returns web pages for image queries. In that
             # case, scrape top pages and extract og:image/markdown image URLs.
-            if (not used_v2) and len(images) < fetch_limit:
+            if (not used_v2) and search_backend_detail == "firecrawl_v1" and len(images) < fetch_limit:
                 visited_pages: set[str] = set()
                 for row in web_results:
                     page_url = str(row.get("url") or "").strip()

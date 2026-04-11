@@ -199,6 +199,34 @@ firecrawl_service_state() {
   )
 }
 
+port_is_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "( sport = :${port} )" 2>/dev/null | grep -q ":${port}[[:space:]]" && return 0
+    return 1
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[.:]${port}$" && return 0
+    return 1
+  fi
+  return 1
+}
+
+choose_available_port() {
+  local candidate="${1:-18080}"
+  local max_tries=50
+  local tries=0
+  while port_is_in_use "$candidate"; do
+    candidate=$((candidate + 1))
+    tries=$((tries + 1))
+    if [[ "$tries" -ge "$max_tries" ]]; then
+      echo "$1"
+      return 0
+    fi
+  done
+  echo "$candidate"
+}
+
 upsert_env() {
   local file="$1"
   local key="$2"
@@ -478,6 +506,10 @@ EOF
 
   local searx_secret
   searx_secret="$(random_hex_64)"
+  local searx_host_port
+  searx_host_port="$(choose_available_port "${WHOX_SEARXNG_HOST_PORT:-18080}")"
+  WHOX_SEARXNG_HOST_PORT_RESOLVED="$searx_host_port"
+  echo "Using SearXNG host port: ${searx_host_port}"
 
   cat > "${FIRECRAWL_DIR}/.env" <<EOF
 PORT=3002
@@ -485,6 +517,7 @@ HOST=0.0.0.0
 USE_DB_AUTHENTICATION=false
 BULL_AUTH_KEY=CHANGEME
 SEARXNG_ENDPOINT=http://searxng:8080
+SEARXNG_PORT=${searx_host_port}
 SEARXNG_SECRET=${searx_secret}
 SEARXNG_CATEGORIES=general,images,videos,news,map
 NUQ_POSTGRES_IMAGE=${nuq_postgres_image}
@@ -576,6 +609,8 @@ services:
       - searxng-config:/etc/searxng
       - ./searxng/settings.yml:/etc/searxng/settings.yml
       - searxng-cache:/var/cache/searxng
+    ports:
+      - "${SEARXNG_PORT:-18080}:8080"
     networks:
       - backend
 
@@ -1114,6 +1149,8 @@ fi
 echo ""
 echo -e "${CYAN}Applying WHOX configuration...${NC}"
 mkdir -p "$WHOX_HOME"
+SEARXNG_HOST_PORT="${WHOX_SEARXNG_HOST_PORT_RESOLVED:-18080}"
+SEARXNG_LOCAL_URL="http://127.0.0.1:${SEARXNG_HOST_PORT}"
 
 if [[ -f "${SNAPSHOT_RUNTIME_DIR}/.env.template" ]]; then
   cp "${SNAPSHOT_RUNTIME_DIR}/.env.template" "$ENV_FILE"
@@ -1142,6 +1179,11 @@ upsert_env "$ENV_FILE" "WHOX_STREAM_RETRIES" "0"
 upsert_env "$ENV_FILE" "WHOX_AGENT_TIMEOUT" "0"
 upsert_env "$ENV_FILE" "WHOX_MAX_ITERATIONS" "0"
 upsert_env "$ENV_FILE" "FIRECRAWL_API_URL" "http://127.0.0.1:3002"
+upsert_env "$ENV_FILE" "SEARXNG_API_URL" "$SEARXNG_LOCAL_URL"
+upsert_env "$ENV_FILE" "WHOX_USE_DIRECT_SEARXNG_SEARCH" "1"
+upsert_env "$ENV_FILE" "WHOX_SEARXNG_SEARCH_TIMEOUT_SECONDS" "4"
+upsert_env "$ENV_FILE" "WHOX_FIRECRAWL_SEARCH_TIMEOUT_SECONDS" "20"
+upsert_env "$ENV_FILE" "WHOX_IMAGE_VALIDATE_TIMEOUT_SECONDS" "2.5"
 upsert_env "$ENV_FILE" "TELEGRAM_REPLY_TO_MODE" "off"
 upsert_env "$ENV_FILE" "WHOX_HIDE_RATE_LIMIT_STATUS" "1"
 upsert_env "$ENV_FILE" "WEBHOOK_ENABLED" "true"
@@ -1188,6 +1230,11 @@ upsert_env "$REPO_ENV_FILE" "WHOX_STREAM_RETRIES" "0"
 upsert_env "$REPO_ENV_FILE" "WHOX_AGENT_TIMEOUT" "0"
 upsert_env "$REPO_ENV_FILE" "WHOX_MAX_ITERATIONS" "0"
 upsert_env "$REPO_ENV_FILE" "FIRECRAWL_API_URL" "http://127.0.0.1:3002"
+upsert_env "$REPO_ENV_FILE" "SEARXNG_API_URL" "$SEARXNG_LOCAL_URL"
+upsert_env "$REPO_ENV_FILE" "WHOX_USE_DIRECT_SEARXNG_SEARCH" "1"
+upsert_env "$REPO_ENV_FILE" "WHOX_SEARXNG_SEARCH_TIMEOUT_SECONDS" "4"
+upsert_env "$REPO_ENV_FILE" "WHOX_FIRECRAWL_SEARCH_TIMEOUT_SECONDS" "20"
+upsert_env "$REPO_ENV_FILE" "WHOX_IMAGE_VALIDATE_TIMEOUT_SECONDS" "2.5"
 upsert_env "$REPO_ENV_FILE" "TELEGRAM_REPLY_TO_MODE" "off"
 upsert_env "$REPO_ENV_FILE" "WHOX_HIDE_RATE_LIMIT_STATUS" "1"
 upsert_env "$REPO_ENV_FILE" "WEBHOOK_ENABLED" "true"
