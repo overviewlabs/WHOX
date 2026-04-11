@@ -847,6 +847,7 @@ echo "✓ Step 4 complete"
 echo ""
 
 TZ_INPUT="$DEFAULT_TZ"
+RUN_PUBLISH_SMOKE_TEST="1"
 
 echo -e "${CYAN}Validating Telegram bot token...${NC}"
 if validate_telegram_token "$TG_BOT_TOKEN"; then
@@ -894,7 +895,17 @@ if ! ensure_caddy "$VPS_DOMAIN_INPUT"; then
   exit 1
 fi
 
-publish_smoke_test "$VPS_DOMAIN_INPUT"
+if [[ -n "$VPS_DOMAIN_INPUT" ]]; then
+  if prompt_yes_no "Run publish smoke test (recommended)" "y"; then
+    RUN_PUBLISH_SMOKE_TEST="1"
+  else
+    RUN_PUBLISH_SMOKE_TEST="0"
+  fi
+fi
+
+if [[ "$RUN_PUBLISH_SMOKE_TEST" == "1" ]]; then
+  publish_smoke_test "$VPS_DOMAIN_INPUT"
+fi
 
 echo ""
 echo -e "${CYAN}Applying WHOX configuration...${NC}"
