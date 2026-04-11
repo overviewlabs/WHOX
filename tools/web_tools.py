@@ -87,7 +87,13 @@ def _searxng_search(query: str, category: str, limit: int, pageno: int = 1) -> D
         "pageno": max(1, int(pageno or 1)),
     }
 
-    with httpx.Client(timeout=_SEARXNG_SEARCH_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    headers = {
+        "User-Agent": "WHOX/1.0 (+local searxng)",
+        "Accept": "application/json,text/html,*/*",
+        "X-Forwarded-For": "127.0.0.1",
+        "X-Real-IP": "127.0.0.1",
+    }
+    with httpx.Client(timeout=_SEARXNG_SEARCH_TIMEOUT_SECONDS, follow_redirects=True, headers=headers) as client:
         resp = client.get(endpoint, params=params)
         resp.raise_for_status()
         payload = resp.json()
@@ -335,4 +341,3 @@ registry.register(
     is_async=True,
     emoji="📄",
 )
-

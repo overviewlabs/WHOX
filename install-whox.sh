@@ -168,6 +168,8 @@ searxng_http_code() {
   code="$(curl -sS --max-time 3 \
     -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) WHOX-Installer/1.0" \
     -H "Accept: application/json,text/html,*/*" \
+    -H "X-Forwarded-For: 127.0.0.1" \
+    -H "X-Real-IP: 127.0.0.1" \
     -o /dev/null -w "%{http_code}" "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
   if [[ ! "$code" =~ ^[0-9]{3}$ ]]; then
     echo "000"
